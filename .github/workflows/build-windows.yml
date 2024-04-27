@@ -3,10 +3,10 @@ name: CMake Build (Windows x86-64)
 on:
   push:
     branches:
-      - master
+      - season2
   pull_request:
     branches:
-      - master
+      - season2
 
 env:
   BUILD_TYPE: Release
