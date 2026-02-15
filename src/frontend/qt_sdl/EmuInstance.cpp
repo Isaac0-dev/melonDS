@@ -65,12 +65,13 @@ extern Net net;
 
 
 EmuInstance::EmuInstance(int inst, bool createMainWindow) : deleting(false),
-    headless(!createMainWindow),
-    netplayID(-1),
     instanceID(inst),
     globalCfg(Config::GetGlobalTable()),
     localCfg(Config::GetLocalTable(inst))
 {
+    headless = !createMainWindow;
+    netplayID = -1;
+
     consoleType = globalCfg.GetInt("Emu.ConsoleType");
 
     ndsSave = nullptr;
@@ -138,22 +139,19 @@ EmuInstance::EmuInstance(int inst, bool createMainWindow) : deleting(false),
     for (int i = 0; i < kMaxWindows; i++)
         windowList[i] = nullptr;
 
-    if (inst == 0 && createMainWindow) topWindow = nullptr;
-    if (createMainWindow)
-    {
-        createWindow();
-
-        // if any extra windows were saved as enabled, open them
-        for (int i = 1; i < kMaxWindows; i++)
-        {
-            std::string key = "Window" + std::to_string(i) + ".Enabled";
-            bool enable = localCfg.GetBool(key);
-            if (enable)
-                createWindow(i);
-        }
-    }
+    if (inst == 0) topWindow = nullptr;
+    createWindow();
 
     emuThread->start();
+
+    // if any extra windows were saved as enabled, open them
+    for (int i = 1; i < kMaxWindows; i++)
+    {
+        std::string key = "Window" + std::to_string(i) + ".Enabled";
+        bool enable = localCfg.GetBool(key);
+        if (enable)
+            createWindow(i);
+    }
 }
 
 EmuInstance::~EmuInstance()
@@ -189,6 +187,8 @@ std::string EmuInstance::instanceFileSuffix()
 
 void EmuInstance::createWindow(int id)
 {
+    if (IsHeadless()) return;
+
     if (numWindows >= kMaxWindows)
     {
         // TODO
@@ -231,6 +231,7 @@ void EmuInstance::createWindow(int id)
 
 void EmuInstance::deleteWindow(int id, bool close)
 {
+    if (IsHeadless()) return;
     if (id >= kMaxWindows) return;
 
     MainWindow* win = windowList[id];
@@ -374,12 +375,14 @@ void EmuInstance::emuStop(StopReason reason)
 
 bool EmuInstance::usesOpenGL()
 {
-    return globalCfg.GetBool("Screen.UseGL") ||
-           (globalCfg.GetInt("3D.Renderer") != renderer3D_Software);
+    return !IsHeadless() && (globalCfg.GetBool("Screen.UseGL") ||
+           (globalCfg.GetInt("3D.Renderer") != renderer3D_Software));
 }
 
 void EmuInstance::initOpenGL(int win)
 {
+    if (IsHeadless()) return;
+
     if (windowList[win])
         windowList[win]->initOpenGL();
 
@@ -411,6 +414,8 @@ void EmuInstance::setVSyncGL(bool vsync)
 
 void EmuInstance::makeCurrentGL()
 {
+    if (IsHeadless()) return;
+
     mainWindow->makeCurrentGL();
 }
 
@@ -426,6 +431,8 @@ void EmuInstance::releaseGL()
 
 void EmuInstance::drawScreen()
 {
+    if (IsHeadless()) return;
+
     for (int i = 0; i < kMaxWindows; i++)
     {
         if (windowList[i])

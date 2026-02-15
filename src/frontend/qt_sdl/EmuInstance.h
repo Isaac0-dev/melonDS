@@ -263,8 +263,8 @@ private:
     void setDateTime();
 
     bool deleting;
-    bool headless;
 
+    bool headless;
     int netplayID; // -1 is none, 0 >= is the netplay DS number
 
     int instanceID;

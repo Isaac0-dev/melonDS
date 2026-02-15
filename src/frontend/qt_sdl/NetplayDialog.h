@@ -94,25 +94,19 @@ public:
         return dlg;
     }
 
-    void updatePlayerList(melonDS::Netplay::Player* players, int num);
+protected:
+    void timerEvent(QTimerEvent* event) override;
 
 private slots:
     void on_btnStartGame_clicked();
     void on_btnLeaveGame_clicked();
     void on_spnInputBufferSize_valueChanged(int value);
+    void done(int r);
 
-    void done(int r) override;
-
-    void timerEvent(QTimerEvent* event) override;
     void doUpdatePlayerList();
-
-signals:
-    void sgUpdatePlayerList(melonDS::Netplay::Player* players, int num);
-    void sgDoUpdatePlayerList(melonDS::Netplay::Player* players, int num);
 
 private:
     Ui::NetplayDialog* ui;
-
     int timerID;
 };
 

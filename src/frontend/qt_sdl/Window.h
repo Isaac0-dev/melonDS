@@ -87,6 +87,7 @@ public:
 
     void loadRecentFilesMenu(bool loadcfg);
     //void updateVideoSettings(bool glchange);
+    void devhackNp(bool client);
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
@@ -201,7 +202,6 @@ private:
 
     bool lanWarning(bool host);
     bool netplayWarning(bool host);
-    void devhackNp(bool client);
 
     bool showOSD;
 
@@ -259,6 +259,7 @@ public:
     QAction* actLANStartClient;
     QAction* actNPStartHost;
     QAction* actNPStartClient;
+    QAction* actNPTest;
 
     QAction* actEmuSettings;
 #ifdef __APPLE__
