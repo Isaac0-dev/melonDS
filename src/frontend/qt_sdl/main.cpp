@@ -392,6 +392,16 @@ int main(int argc, char** argv)
 
         if (options->fullscreen)
             win->toggleFullscreen();
+
+        extern bool forceServer;
+        extern bool forceClient;
+
+        if (forceServer) {
+            win->devhackNp(false);
+        }
+        if (forceClient) {
+            win->devhackNp(true);
+        }
     }
 
     int ret = melon.exec();

@@ -30,6 +30,9 @@
 using melonDS::Platform::Log;
 using melonDS::Platform::LogLevel;
 
+bool forceServer = false;
+bool forceClient = false;
+
 namespace CLI
 {
 
@@ -43,6 +46,8 @@ CommandLineOptions* ManageArgs(QApplication& melon)
 
     parser.addOption(QCommandLineOption({"b", "boot"}, "Whether to boot firmware on startup. Defaults to \"auto\" (boot if NDS rom given)", "auto/always/never", "auto"));
     parser.addOption(QCommandLineOption({"f", "fullscreen"}, "Start melonDS in fullscreen mode"));
+    parser.addOption(QCommandLineOption({"s", "server"}, "dev mode server netplay"));
+    parser.addOption(QCommandLineOption({"c", "client"}, "dev mode client netplay"));
 
 #ifdef ARCHIVE_SUPPORT_ENABLED
     parser.addOption(QCommandLineOption({"a", "archive-file"}, "Specify file to load inside an archive given (NDS)", "rom"));
@@ -54,6 +59,8 @@ CommandLineOptions* ManageArgs(QApplication& melon)
     CommandLineOptions* options = new CommandLineOptions;
 
     options->fullscreen = parser.isSet("fullscreen");
+    forceServer = parser.isSet("server");
+    forceClient = parser.isSet("client");
 
     QStringList posargs = parser.positionalArguments();
     switch (posargs.size())
