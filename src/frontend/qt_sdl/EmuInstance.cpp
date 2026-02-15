@@ -64,7 +64,9 @@ const string kWifiSettingsPath = "wfcsettings.bin";
 extern Net net;
 
 
-EmuInstance::EmuInstance(int inst) : deleting(false),
+EmuInstance::EmuInstance(int inst, bool createMainWindow) : deleting(false),
+    headless(!createMainWindow),
+    netplayID(-1),
     instanceID(inst),
     globalCfg(Config::GetGlobalTable()),
     localCfg(Config::GetLocalTable(inst))
@@ -136,19 +138,22 @@ EmuInstance::EmuInstance(int inst) : deleting(false),
     for (int i = 0; i < kMaxWindows; i++)
         windowList[i] = nullptr;
 
-    if (inst == 0) topWindow = nullptr;
-    createWindow();
+    if (inst == 0 && createMainWindow) topWindow = nullptr;
+    if (createMainWindow)
+    {
+        createWindow();
+
+        // if any extra windows were saved as enabled, open them
+        for (int i = 1; i < kMaxWindows; i++)
+        {
+            std::string key = "Window" + std::to_string(i) + ".Enabled";
+            bool enable = localCfg.GetBool(key);
+            if (enable)
+                createWindow(i);
+        }
+    }
 
     emuThread->start();
-
-    // if any extra windows were saved as enabled, open them
-    for (int i = 1; i < kMaxWindows; i++)
-    {
-        std::string key = "Window" + std::to_string(i) + ".Enabled";
-        bool enable = localCfg.GetBool(key);
-        if (enable)
-            createWindow(i);
-    }
 }
 
 EmuInstance::~EmuInstance()

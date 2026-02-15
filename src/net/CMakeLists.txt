@@ -33,3 +33,6 @@ else()
     fix_interface_includes(PkgConfig::ENet)
     target_link_libraries(net-utils PUBLIC PkgConfig::ENet)
 endif()
+
+find_package(ZLIB REQUIRED)
+target_link_libraries(net-utils PUBLIC ZLIB::ZLIB)

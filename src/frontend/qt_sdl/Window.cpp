@@ -73,6 +73,7 @@
 #include "Savestate.h"
 #include "MPInterface.h"
 #include "LANDialog.h"
+#include "NetplayDialog.h"
 
 //#include "main_shaders.h"
 
@@ -462,16 +463,13 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
                 actLANStartClient = submenu->addAction("Join LAN game");
                 connect(actLANStartClient, &QAction::triggered, this, &MainWindow::onLANStartClient);
 
-                /*submenu->addSeparator();
+                submenu->addSeparator();
 
-                actNPStartHost = submenu->addAction("NETPLAY HOST");
+                actNPStartHost = submenu->addAction("Host Netplay game");
                 connect(actNPStartHost, &QAction::triggered, this, &MainWindow::onNPStartHost);
 
-                actNPStartClient = submenu->addAction("NETPLAY CLIENT");
+                actNPStartClient = submenu->addAction("Join Netplay game");
                 connect(actNPStartClient, &QAction::triggered, this, &MainWindow::onNPStartClient);
-
-                actNPTest = submenu->addAction("NETPLAY GO");
-                connect(actNPTest, &QAction::triggered, this, &MainWindow::onNPTest);*/
             }
         }
         {
@@ -1788,20 +1786,23 @@ void MainWindow::onLANStartClient()
 
 void MainWindow::onNPStartHost()
 {
-    //Netplay::StartHost();
-    //NetplayStartHostDialog::openDlg(this);
+    if (!netplayWarning(true)) return;
+    NetplayStartHostDialog::openDlg(this);
 }
 
 void MainWindow::onNPStartClient()
 {
-    //Netplay::StartClient();
-    //NetplayStartClientDialog::openDlg(this);
+    if (!netplayWarning(false)) return;
+    NetplayStartClientDialog::openDlg(this);
 }
 
-void MainWindow::onNPTest()
+void MainWindow::devhackNp(bool client)
 {
-    // HAX
-    //Netplay::StartGame();
+    if (client) {
+        onNPStartClient();
+    } else {
+        onNPStartHost();
+    }
 }
 
 void MainWindow::updateMPInterface(MPInterfaceType type)
@@ -1814,9 +1815,8 @@ void MainWindow::updateMPInterface(MPInterfaceType type)
     actMPNewInstance->setEnabled(enable);
     actLANStartHost->setEnabled(enable);
     actLANStartClient->setEnabled(enable);
-    /*actNPStartHost->setEnabled(enable);
+    actNPStartHost->setEnabled(enable);
     actNPStartClient->setEnabled(enable);
-    actNPTest->setEnabled(enable);*/
 }
 
 bool MainWindow::lanWarning(bool host)
@@ -1834,6 +1834,73 @@ bool MainWindow::lanWarning(bool host)
         return false;
 
     deleteAllEmuInstances(1);
+    return true;
+}
+
+bool MainWindow::netplayWarning(bool host)
+{
+    QString verb = host ? "host" : "join";
+
+    bool doDelInstances = false;
+
+    if (numEmuInstances() >= 2)
+    {
+        QString msg = "Multiple emulator instances are currently open.\n"
+                      "If you "+verb+" a netplay game now, all secondary instances will be closed.\n\n"
+                                         "Do you wish to continue?";
+
+        auto res = QMessageBox::warning(this, "melonDS", msg, QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (res == QMessageBox::No)
+            return false;
+
+        doDelInstances = true;
+    }
+
+    if (doDelInstances) deleteAllEmuInstances(1);
+
+    // hack: create function to allow interaction with frontend
+    OnStartEmulatorThread = [this]()
+    {
+        printf("OnStartEmulatorThread called\n");
+
+        deleteAllEmuInstances(1);
+
+        auto &netplay = (Netplay&)MPInterface::Get();
+
+        // start local ds
+        EmuInstance *localEmuInstance = ((MainWindow*)this)->getEmuInstance();
+        localEmuInstance->RegisterNetplayDS(netplay.GetMyPlayer().ID); // register the local ds
+        if (!localEmuInstance->nds) localEmuInstance->updateConsole();
+        netplay.RegisterInstance(netplay.GetMyPlayer().ID, localEmuInstance->nds);
+        localEmuInstance->nds->Start();
+        localEmuInstance->getEmuThread()->emuRun();
+
+        return; // todo DEV just to test with 1 ds, since it's so far more stable
+        auto cart = localEmuInstance->nds->GetNDSCart();
+
+        // create and start the new ds'
+        for (int i = 1; i < std::max(netplay.GetNumPlayers(), 2); ++i)
+        {
+            EmuInstance *emuInstance = new EmuInstance(i, true);
+            emuInstance->RegisterNetplayDS(i);
+            emuInstance->updateConsole();
+            netplay.RegisterInstance(i, emuInstance->nds);
+
+            auto newCart = std::make_unique<NDSCart::CartCommon>(
+                cart->GetROM(),
+                cart->GetROMLength(),
+                cart->ID(),
+                false, // assumes it's not a bad dump
+                cart->GetROMParams(),
+                (const melonDS::NDSCart::CartType) cart->Type(),
+                nullptr
+            );
+            emuInstance->nds->SetNDSCart(std::move(newCart));
+            emuInstance->nds->Start();
+            emuInstance->getEmuThread()->emuRun();
+        }
+    };
+
     return true;
 }
 
@@ -2338,7 +2405,7 @@ void MainWindow::onUpdateVideoSettings(bool glchange)
 
     if (glchange)
     {
-        if (hasOGL) 
+        if (hasOGL)
         {
             emuThread->initContext(windowID);
             for (auto child: childwins)

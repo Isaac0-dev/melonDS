@@ -134,7 +134,6 @@ private slots:
     void onLANStartClient();
     void onNPStartHost();
     void onNPStartClient();
-    void onNPTest();
 
     void onOpenEmuSettings();
     void onEmuSettingsDialogFinished(int res);
@@ -201,6 +200,8 @@ private:
     void createScreenPanel();
 
     bool lanWarning(bool host);
+    bool netplayWarning(bool host);
+    void devhackNp(bool client);
 
     bool showOSD;
 
@@ -258,7 +259,6 @@ public:
     QAction* actLANStartClient;
     QAction* actNPStartHost;
     QAction* actNPStartClient;
-    QAction* actNPTest;
 
     QAction* actEmuSettings;
 #ifdef __APPLE__

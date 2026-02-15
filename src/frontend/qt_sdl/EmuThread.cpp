@@ -55,6 +55,9 @@
 
 #include "EmuInstance.h"
 
+#include "MPInterface.h"
+#include "Netplay.h"
+
 using namespace melonDS;
 
 
@@ -152,10 +155,24 @@ void EmuThread::run()
 
     while (emuStatus != emuStatus_Exit)
     {
-        if (emuInstance->instanceID == 0)
-            MPInterface::Get().Process();
-
+        bool needLag = false;
+        MPInterface &mpInterface = MPInterface::Get();
+        mpInterface.Process();
         emuInstance->inputProcess();
+        if (emuInstance->netplayID > -1)
+        {
+            auto &netplay = (Netplay&) mpInterface;
+            netplay.ProcessInput(
+                emuInstance->netplayID,
+                emuInstance->nds,
+                emuInstance->inputMask,
+                emuInstance->isTouching,
+                emuInstance->touchX,
+                emuInstance->touchY
+            );
+            needLag = netplay.StallFrame;
+            netplay.StallFrame = false;
+        }
 
         if (emuInstance->hotkeyPressed(HK_FrameLimitToggle)) emit windowLimitFPSChange();
 
@@ -168,7 +185,7 @@ void EmuThread::run()
         if (emuInstance->hotkeyPressed(HK_SwapScreens)) emit swapScreensToggle();
         if (emuInstance->hotkeyPressed(HK_SwapScreenEmphasis)) emit screenEmphasisToggle();
 
-        if (emuStatus == emuStatus_Running || emuStatus == emuStatus_FrameStep)
+        if ((emuStatus == emuStatus_Running || emuStatus == emuStatus_FrameStep) && !needLag)
         {
             if (emuStatus == emuStatus_FrameStep) emuStatus = emuStatus_Paused;
 
@@ -252,7 +269,19 @@ void EmuThread::run()
             }
 
             // process input and hotkeys
-            emuInstance->nds->SetKeyMask(emuInstance->inputMask);
+            auto &netplay = (Netplay&)MPInterface::Get();
+            if (emuInstance->netplayID < 0 ||
+                ((netplay.NetworkMode == Netplay::InputDelayMode_Golf) &&
+                (netplay.GolfModePlayerID == netplay.GetMyPlayer().ID)))
+            {
+                emuInstance->nds->SetKeyMask(emuInstance->inputMask);
+                if (emuInstance->isTouching)
+                    emuInstance->nds->TouchScreen(emuInstance->touchX, emuInstance->touchY);
+                else
+                    emuInstance->nds->ReleaseScreen();
+            } else {
+                netplay.ApplyInput(emuInstance->netplayID, emuInstance->nds);
+            }
 
             if (emuInstance->isTouching)
                 emuInstance->nds->TouchScreen(emuInstance->touchX, emuInstance->touchY);
@@ -329,7 +358,7 @@ void EmuThread::run()
                 emit windowUpdate();
                 winUpdateCount = 0;
             }
-            
+
             if (emuInstance->hotkeyPressed(HK_FastForwardToggle)) emuInstance->fastForwardToggled = !emuInstance->fastForwardToggled;
             if (emuInstance->hotkeyPressed(HK_SlowMoToggle)) emuInstance->slowmoToggled = !emuInstance->slowmoToggled;
 
@@ -416,7 +445,7 @@ void EmuThread::run()
                 winUpdateFreq = fps / (u32)round(fpstarget);
                 if (winUpdateFreq < 1)
                     winUpdateFreq = 1;
-                    
+
                 double actualfps = (59.8261 * 263.0) / nlines;
                 snprintf(melontitle, sizeof(melontitle), "[%d/%.0f] melonDS " MELONDS_VERSION, fps, actualfps);
                 changeWindowTitle(melontitle);
@@ -854,6 +883,7 @@ void EmuThread::enableCheats(bool enable)
 
 void EmuThread::updateRenderer()
 {
+    if (emuInstance->IsHeadless()) return;
     auto nds = emuInstance->nds;
 
     if (videoRenderer != lastVideoRenderer)
