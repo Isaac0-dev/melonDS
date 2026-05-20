@@ -21,6 +21,7 @@
 #include <string.h>
 #include <queue>
 #include <cassert>
+#include <memory>
 
 #include <enet/enet.h>
 #include <zlib.h>
@@ -100,6 +101,7 @@ Netplay::Netplay() noexcept : LocalMP(), Inited(false)
         nds_instances[i] = nullptr;
     }
     PacketSequenceCounter = 1;
+    DesyncDumped = false;
 
     // TODO make this somewhat nicer
     if (enet_initialize() != 0)
@@ -120,6 +122,8 @@ Netplay::~Netplay() noexcept
     enet_deinitialize();
 
     Platform::Mutex_Free(PlayersMutex);
+    Platform::Mutex_Free(InstanceMutex);
+    Platform::Mutex_Free(NetworkMutex);
 
     Platform::Log(Platform::LogLevel::Info, "Netplay: enet deinitialized\n");
 }
@@ -220,6 +224,7 @@ bool Netplay::StartHost(const char* playername, int port)
 
     Active = true;
     IsHost = true;
+    DesyncDumped = false;
 
     return true;
 }
@@ -332,16 +337,17 @@ bool Netplay::StartClient(const char* playername, const char* host, int port)
 
     Active = true;
     IsHost = false;
+    DesyncDumped = false;
     Platform::Log(Platform::LogLevel::Info, "Netplay: connected as client\n");
     return true;
 }
 
 void Netplay::EndSession()
 {
-    if (!Active) return;
-
     Active = false;
+    StallFrame = false;
 
+    Platform::Mutex_Lock(NetworkMutex);
     for (int i = 0; i < 16; i++)
     {
         if (i == MyPlayer.ID) continue;
@@ -352,9 +358,27 @@ void Netplay::EndSession()
         RemotePeers[i] = nullptr;
     }
 
-    enet_host_destroy(Host);
-    Host = nullptr;
+    if (Host)
+    {
+        enet_host_destroy(Host);
+        Host = nullptr;
+    }
     IsHost = false;
+    Platform::Mutex_Unlock(NetworkMutex);
+
+    Platform::Mutex_Lock(InstanceMutex);
+    for (int i = 0; i < 16; i++)
+    {
+        PendingFrames[i].Active = false;
+        PendingFrames[i].FrameNum = 0;
+        PendingFrames[i].SavestateBuffer.reset();
+        nds_instances[i] = nullptr;
+        InputHistory[i].clear();
+        ReceivedInputThisFrame[i] = false;
+    }
+    Platform::Mutex_Unlock(InstanceMutex);
+
+    PortToPlayerIndex.clear();
 }
 
 void Netplay::SendNetworkSettings()
@@ -458,13 +482,17 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
             if (evt.type == ENET_EVENT_TYPE_RECEIVE && evt.channelID == Chan_Blob)
             {
                 RecvBlob(evt.peer, evt.packet, inst);
-                if (evt.packet->dataLength >= 1 && evt.packet->data[0] == 0x03)
+                bool blobDone = evt.packet->dataLength >= 1 && evt.packet->data[0] == 0x03;
+                enet_packet_destroy(evt.packet);
+                if (blobDone)
                 {
                     break;
                 }
             }
             else
             {
+                if (evt.type == ENET_EVENT_TYPE_RECEIVE)
+                    enet_packet_destroy(evt.packet);
                 break;
             }
         }
@@ -580,9 +608,14 @@ void Netplay::SyncClients()
         {
             if (evt.packet->dataLength == 1 && evt.packet->data[0] == 0x04)
                 ngood++;
+            enet_packet_destroy(evt.packet);
         }
         else
+        {
+            if (evt.type == ENET_EVENT_TYPE_RECEIVE)
+                enet_packet_destroy(evt.packet);
             break;
+        }
 
         if (ngood >= (NumPlayers-1))
             break;
@@ -653,6 +686,11 @@ void Netplay::ProcessHost(int inst)
     if (!Host) return;
 
     Platform::Mutex_Lock(NetworkMutex);
+    if (!Host)
+    {
+        Platform::Mutex_Unlock(NetworkMutex);
+        return;
+    }
 
     ENetEvent event;
     while (enet_host_service(Host, &event, 0) > 0)
@@ -806,6 +844,9 @@ void Netplay::ProcessHost(int inst)
             }
             break;
         }
+
+        if (event.type == ENET_EVENT_TYPE_RECEIVE)
+            enet_packet_destroy(event.packet);
     }
     Platform::Mutex_Unlock(NetworkMutex);
 }
@@ -813,6 +854,13 @@ void Netplay::ProcessHost(int inst)
 void Netplay::ProcessClient(int inst)
 {
     if (!Host) return;
+
+    Platform::Mutex_Lock(NetworkMutex);
+    if (!Host)
+    {
+        Platform::Mutex_Unlock(NetworkMutex);
+        return;
+    }
 
     ENetEvent event;
     while (enet_host_service(Host, &event, 0) > 0)
@@ -929,7 +977,11 @@ void Netplay::ProcessClient(int inst)
             }
             break;
         }
+
+        if (event.type == ENET_EVENT_TYPE_RECEIVE)
+            enet_packet_destroy(event.packet);
     }
+    Platform::Mutex_Unlock(NetworkMutex);
 }
 
 void Netplay::ProcessFrame(int inst)
@@ -954,6 +1006,60 @@ Netplay::InputFrame *Netplay::GetInputFrame(u16 playerID, u32 frameNum)
     return (it != playerHistory.end()) ? &it->second : nullptr;
 }
 
+u32 Netplay::ComputeStateHash(NDS* nds)
+{
+    if (!nds) return 0;
+
+    std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
+    if (!nds->DoSavestate(state.get()) || state->Error)
+    {
+        Platform::Log(Platform::LogLevel::Error, "Netplay: failed to create savestate for state hash\n");
+        return 0;
+    }
+    state->Finish();
+
+    return crc32(0L, static_cast<const Bytef*>(state->Buffer()), state->Length());
+}
+
+void Netplay::DumpDesyncState(NDS* nds, u32 frameNum, u32 localHash, u32 remoteHash)
+{
+    if (!nds || DesyncDumped) return;
+
+    std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
+    if (!nds->DoSavestate(state.get()) || state->Error)
+    {
+        Platform::Log(Platform::LogLevel::Error, "Netplay: failed to create desync dump savestate\n");
+        return;
+    }
+    state->Finish();
+
+    const char* role = IsHost ? "host" : "client";
+    char path[256];
+    snprintf(path, sizeof(path), "netplay-desync-%s-frame-%u-local-%08X-remote-%08X.mln",
+             role, frameNum, localHash, remoteHash);
+
+    FILE* file = fopen(path, "wb");
+    if (!file)
+    {
+        Platform::Log(Platform::LogLevel::Error, "Netplay: failed to open desync dump '%s'\n", path);
+        return;
+    }
+
+    size_t written = fwrite(state->Buffer(), 1, state->Length(), file);
+    fclose(file);
+
+    if (written != state->Length())
+    {
+        Platform::Log(Platform::LogLevel::Error, "Netplay: incomplete desync dump '%s' (%zu/%u bytes)\n",
+                      path, written, state->Length());
+        return;
+    }
+
+    DesyncDumped = true;
+    Platform::Log(Platform::LogLevel::Info, "Netplay: wrote desync savestate dump '%s' (%u bytes)\n",
+                  path, state->Length());
+}
+
 void Netplay::ReceiveInputs(ENetEvent &event, int inst)
 {
     if (!Active) return;
@@ -967,6 +1073,11 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
 
     u8* data = (u8*)event.packet->data;
     size_t dataSize = event.packet->dataLength;
+    if (dataSize < sizeof(InputReport))
+    {
+        Platform::Mutex_Unlock(InstanceMutex);
+        return;
+    }
 
     const InputReport* report = reinterpret_cast<const InputReport*>(data);
 
@@ -978,27 +1089,16 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
     InstanceState& pending = PendingFrames[inst];
     NDS* nds = nds_instances[inst];
 
-    // Check for desync if a hash was provided
+    // Check for desync if a hash was provided.
     if (remoteHash != 0 && nds && (nds->NumFrames == latestFrame))
     {
-        u32 localHash = crc32(0L, Z_NULL, 0);
-        for (int i = 0; i < 16; i++)
-        {
-            u32 r9 = nds->ARM9.R[i];
-            u32 r7 = nds->ARM7.R[i];
-            localHash = crc32(localHash, (u8*)&r9, 4);
-            localHash = crc32(localHash, (u8*)&r7, 4);
-        }
-        u32 pc9 = nds->GetPC(0);
-        u32 pc7 = nds->GetPC(1);
-        localHash = crc32(localHash, (u8*)&pc9, 4);
-        localHash = crc32(localHash, (u8*)&pc7, 4);
+        u32 localHash = ComputeStateHash(nds);
 
         if (localHash != remoteHash)
         {
             Platform::Log(Platform::LogLevel::Error, "Netplay: DESYNC DETECTED at frame %u! (local: %08X, remote: %08X)\n",
                           latestFrame, localHash, remoteHash);
-            // TODO: Trigger background resync
+            DumpDesyncState(nds, latestFrame, localHash, remoteHash);
         }
     }
 
@@ -1128,23 +1228,11 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     InputHistory[MyPlayer.ID][delayedFrame.FrameNum] = delayedFrame;
     Platform::Mutex_Unlock(InstanceMutex);
 
-    // Calculate state hash for desync detection every 60 frames
+    // Calculate a full savestate hash for desync detection every 60 frames.
     u32 stateHash = 0;
     if ((nds->NumFrames % 60) == 0)
     {
-        // Simple hash of registers and PC for both CPUs
-        stateHash = crc32(0L, Z_NULL, 0);
-        for (int i = 0; i < 16; i++)
-        {
-            u32 r9 = nds->ARM9.R[i];
-            u32 r7 = nds->ARM7.R[i];
-            stateHash = crc32(stateHash, (u8*)&r9, 4);
-            stateHash = crc32(stateHash, (u8*)&r7, 4);
-        }
-        u32 pc9 = nds->GetPC(0);
-        u32 pc7 = nds->GetPC(1);
-        stateHash = crc32(stateHash, (u8*)&pc9, 4);
-        stateHash = crc32(stateHash, (u8*)&pc7, 4);
+        stateHash = ComputeStateHash(nds);
     }
 
     // Send the inputs to other players
@@ -1175,8 +1263,13 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         }
         Platform::Mutex_Unlock(InstanceMutex);
 
-        ENetPacket* pkt = enet_packet_create(buffer.data(), buffer.size(), ENET_PACKET_FLAG_UNSEQUENCED);
-        enet_host_broadcast(Host, Chan_Input0 + MyPlayer.ID, pkt);
+        Platform::Mutex_Lock(NetworkMutex);
+        if (Host)
+        {
+            ENetPacket* pkt = enet_packet_create(buffer.data(), buffer.size(), ENET_PACKET_FLAG_UNSEQUENCED);
+            enet_host_broadcast(Host, Chan_Input0 + MyPlayer.ID, pkt);
+        }
+        Platform::Mutex_Unlock(NetworkMutex);
     }
 
     // also find the last completed frame of all players
@@ -1214,13 +1307,6 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     }
     Platform::Mutex_Unlock(PlayersMutex);
 
-    // Host never stalls -- it runs ahead and lets clients
-    // catch up via rollback.
-    if (!IsHost && (!allOtherInputsReceived || tooFarAhead))
-    {
-        StallFrame = true;
-    }
-
     // clear received flags for next frame
     Platform::Mutex_Lock(PlayersMutex);
     for (int i = 0; i < 16; ++i)
@@ -1256,6 +1342,16 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         }
     }
 
+    // Host never stalls -- it runs ahead and lets clients catch up via
+    // rollback. Clients should only stall when the exact frame they need is
+    // unavailable, or when clock-lock says they are too far ahead. A packet
+    // not arriving during this frontend loop iteration is not itself a
+    // reason to stop emulation.
+    if (!IsHost && (missingInputs || tooFarAhead))
+    {
+        StallFrame = true;
+    }
+
     // DEBUG: log stall state periodically
     static u32 stallLogCounter = 0;
     if (StallFrame || missingInputs)
@@ -1287,7 +1383,7 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         Platform::Mutex_Unlock(InstanceMutex);
     }
 
-    StallFrame = false;
+    // Keep StallFrame visible to EmuThread for this iteration.
 }
 
 void Netplay::ApplyInput(int netplayID, NDS *nds)

@@ -157,9 +157,10 @@ void EmuThread::run()
     {
         bool needLag = false;
         MPInterface &mpInterface = MPInterface::Get();
+        const bool netplayActive = MPInterface::GetType() == MPInterface_Netplay;
         mpInterface.Process();
         emuInstance->inputProcess();
-        if (emuInstance->netplayID > -1)
+        if (netplayActive && emuInstance->netplayID > -1)
         {
             auto &netplay = (Netplay&) mpInterface;
             netplay.ProcessInput(
@@ -269,10 +270,11 @@ void EmuThread::run()
             }
 
             // process input and hotkeys
-            auto &netplay = (Netplay&)MPInterface::Get();
-            if (emuInstance->netplayID < 0 ||
-                ((netplay.NetworkMode == Netplay::InputDelayMode_Golf) &&
-                (netplay.GolfModePlayerID == netplay.GetMyPlayer().ID)))
+            const bool netplayActive = MPInterface::GetType() == MPInterface_Netplay;
+            Netplay* netplay = netplayActive ? (Netplay*)&MPInterface::Get() : nullptr;
+            if (!netplayActive || emuInstance->netplayID < 0 ||
+                ((netplay->NetworkMode == Netplay::InputDelayMode_Golf) &&
+                (netplay->GolfModePlayerID == netplay->GetMyPlayer().ID)))
             {
                 emuInstance->nds->SetKeyMask(emuInstance->inputMask);
                 if (emuInstance->isTouching)
@@ -280,7 +282,7 @@ void EmuThread::run()
                 else
                     emuInstance->nds->ReleaseScreen();
             } else {
-                netplay.ApplyInput(emuInstance->netplayID, emuInstance->nds);
+                netplay->ApplyInput(emuInstance->netplayID, emuInstance->nds);
             }
 
             if (emuInstance->hotkeyPressed(HK_Lid))

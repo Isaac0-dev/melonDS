@@ -160,6 +160,8 @@ NetplayDialog::NetplayDialog(QWidget* parent) : QDialog(parent), ui(new Ui::Netp
 NetplayDialog::~NetplayDialog()
 {
     killTimer(timerID);
+    if (netplayDlg == this)
+        netplayDlg = nullptr;
 
     delete ui;
 }
@@ -186,6 +188,11 @@ void NetplayDialog::done(int r)
                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::No)
             return;
     }*/
+
+    MainWindow* mainWindow = qobject_cast<MainWindow*>(parentWidget());
+    EmuInstance* emuInstance = mainWindow ? mainWindow->getEmuInstance() : nullptr;
+    if (emuInstance)
+        emuInstance->RegisterNetplayDS(-1);
 
     netplay().EndSession();
     setMPInterface(MPInterface_Local);

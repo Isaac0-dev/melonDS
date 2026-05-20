@@ -164,6 +164,7 @@ private:
     Platform::Mutex* InstanceMutex;
     Platform::Mutex* NetworkMutex;
     u32 PacketSequenceCounter;
+    bool DesyncDumped;
 
     // Array of NDS pointers for each local instance
     NDS* nds_instances[16];
@@ -201,6 +202,8 @@ private:
 
     void ReceiveInputs(ENetEvent &event, int inst);
     void ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum);
+    u32 ComputeStateHash(NDS* nds);
+    void DumpDesyncState(NDS* nds, u32 frameNum, u32 localHash, u32 remoteHash);
 
     bool SendBlob(int type, u32 len, u8* data);
     void RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst);
