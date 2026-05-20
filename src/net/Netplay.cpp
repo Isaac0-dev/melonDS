@@ -956,6 +956,8 @@ Netplay::InputFrame *Netplay::GetInputFrame(u16 playerID, u32 frameNum)
 
 void Netplay::ReceiveInputs(ENetEvent &event, int inst)
 {
+    if (!Active) return;
+
     Platform::Mutex_Lock(PlayersMutex);
     int index = GetPlayerIndexFromEndpoint(event.peer->address.host, event.peer->address.port);
     Platform::Mutex_Unlock(PlayersMutex);
@@ -1097,6 +1099,8 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
 
 void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouching, u16 touchX, u16 touchY)
 {
+    if (!Active) return;
+
     StallFrame = false;
 
     // Register/update NDS pointer for this instance
@@ -1210,14 +1214,9 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     }
     Platform::Mutex_Unlock(PlayersMutex);
 
-    // Host never stalls waiting for remote inputs -- it runs ahead and
-    // lets clients catch up via rollback. Only stall if tooFarAhead.
-    if (IsHost)
-    {
-        if (tooFarAhead)
-            StallFrame = true;
-    }
-    else if (!allOtherInputsReceived || tooFarAhead)
+    // Host never stalls -- it runs ahead and lets clients
+    // catch up via rollback.
+    if (!IsHost && (!allOtherInputsReceived || tooFarAhead))
     {
         StallFrame = true;
     }
@@ -1293,6 +1292,8 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
 
 void Netplay::ApplyInput(int netplayID, NDS *nds)
 {
+    if (!Active) return;
+
     // Update pointer map
     nds_instances[netplayID] = nds;
 
@@ -1369,8 +1370,11 @@ void Netplay::ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum)
 
 void Netplay::Process()
 {
+    if (!Active) return;
+
     for (int i = 0; i < 16; i++)
     {
+        if (!nds_instances[i]) continue;
         ProcessFrame(i);
     }
     LocalMP::Process();
