@@ -1315,7 +1315,9 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     delayedFrame.TouchY = touchY;
 
     Platform::Mutex_Lock(InstanceMutex);
-    InputHistory[MyPlayer.ID][immediateFrame.FrameNum] = immediateFrame;
+    // Keep a startup/immediate fallback, but do not overwrite a delayed
+    // canonical input that was recorded Settings.Delay frames earlier.
+    InputHistory[MyPlayer.ID].emplace(immediateFrame.FrameNum, immediateFrame);
     InputHistory[MyPlayer.ID][delayedFrame.FrameNum] = delayedFrame;
     Platform::Mutex_Unlock(InstanceMutex);
 
