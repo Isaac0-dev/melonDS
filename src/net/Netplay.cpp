@@ -1021,15 +1021,27 @@ u32 Netplay::CaptureStateSnapshot(int inst, NDS* nds, u32 frameNum)
 
     StateSnapshot snapshot;
     snapshot.Hash = crc32(0L, static_cast<const Bytef*>(state->Buffer()), state->Length());
-    snapshot.Buffer.resize(state->Length());
-    memcpy(snapshot.Buffer.data(), state->Buffer(), state->Length());
+    snapshot.Buffer = std::make_shared<std::vector<u8>>(state->Length());
+    memcpy(snapshot.Buffer->data(), state->Buffer(), state->Length());
+
+    StoreStateSnapshot(inst, frameNum, snapshot);
+    for (int i = 0; i < 16; i++)
+    {
+        if (i != inst && nds_instances[i] == nds)
+            StoreStateSnapshot(i, frameNum, snapshot);
+    }
+
+    return snapshot.Hash;
+}
+
+void Netplay::StoreStateSnapshot(int inst, u32 frameNum, const StateSnapshot& snapshot)
+{
+    if (inst < 0 || inst >= 16) return;
 
     auto& snapshots = StateSnapshots[inst];
-    snapshots[frameNum] = std::move(snapshot);
-    while (snapshots.size() > 16)
+    snapshots[frameNum] = snapshot;
+    while (snapshots.size() > 32)
         snapshots.erase(snapshots.begin());
-
-    return snapshots[frameNum].Hash;
 }
 
 u32 Netplay::ComputeStateHash(NDS* nds)
@@ -1157,7 +1169,7 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
         if (snapshotIt != StateSnapshots[inst].end())
         {
             localHash = snapshotIt->second.Hash;
-            localState = &snapshotIt->second.Buffer;
+            localState = snapshotIt->second.Buffer.get();
         }
         else if (nds->NumFrames == latestFrame)
         {

@@ -23,6 +23,7 @@
 #include <map>
 #include <unordered_map>
 #include <vector>
+#include <memory>
 
 #include <enet/enet.h>
 
@@ -170,7 +171,7 @@ private:
     struct StateSnapshot
     {
         u32 Hash;
-        std::vector<u8> Buffer;
+        std::shared_ptr<std::vector<u8>> Buffer;
     };
     std::map<u32, StateSnapshot> StateSnapshots[16];
 
@@ -211,6 +212,7 @@ private:
     void ReceiveInputs(ENetEvent &event, int inst);
     void ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum);
     u32 CaptureStateSnapshot(int inst, NDS* nds, u32 frameNum);
+    void StoreStateSnapshot(int inst, u32 frameNum, const StateSnapshot& snapshot);
     u32 ComputeStateHash(NDS* nds);
     void DumpDesyncState(NDS* nds, u32 frameNum, u32 localHash, u32 remoteHash);
     void DumpDesyncState(const std::vector<u8>& state, u32 frameNum, u32 localHash, u32 remoteHash);
