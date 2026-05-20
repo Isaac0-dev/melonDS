@@ -22,6 +22,7 @@
 #include <queue>
 #include <map>
 #include <unordered_map>
+#include <vector>
 
 #include <enet/enet.h>
 
@@ -166,6 +167,13 @@ private:
     u32 PacketSequenceCounter;
     bool DesyncDumped;
 
+    struct StateSnapshot
+    {
+        u32 Hash;
+        std::vector<u8> Buffer;
+    };
+    std::map<u32, StateSnapshot> StateSnapshots[16];
+
     // Array of NDS pointers for each local instance
     NDS* nds_instances[16];
 
@@ -202,8 +210,10 @@ private:
 
     void ReceiveInputs(ENetEvent &event, int inst);
     void ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum);
+    u32 CaptureStateSnapshot(int inst, NDS* nds, u32 frameNum);
     u32 ComputeStateHash(NDS* nds);
     void DumpDesyncState(NDS* nds, u32 frameNum, u32 localHash, u32 remoteHash);
+    void DumpDesyncState(const std::vector<u8>& state, u32 frameNum, u32 localHash, u32 remoteHash);
 
     bool SendBlob(int type, u32 len, u8* data);
     void RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst);

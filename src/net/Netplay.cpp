@@ -374,6 +374,7 @@ void Netplay::EndSession()
         PendingFrames[i].SavestateBuffer.reset();
         nds_instances[i] = nullptr;
         InputHistory[i].clear();
+        StateSnapshots[i].clear();
         ReceivedInputThisFrame[i] = false;
     }
     Platform::Mutex_Unlock(InstanceMutex);
@@ -1006,6 +1007,31 @@ Netplay::InputFrame *Netplay::GetInputFrame(u16 playerID, u32 frameNum)
     return (it != playerHistory.end()) ? &it->second : nullptr;
 }
 
+u32 Netplay::CaptureStateSnapshot(int inst, NDS* nds, u32 frameNum)
+{
+    if (!nds || inst < 0 || inst >= 16) return 0;
+
+    std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
+    if (!nds->DoSavestate(state.get()) || state->Error)
+    {
+        Platform::Log(Platform::LogLevel::Error, "Netplay: failed to create savestate for state hash\n");
+        return 0;
+    }
+    state->Finish();
+
+    StateSnapshot snapshot;
+    snapshot.Hash = crc32(0L, static_cast<const Bytef*>(state->Buffer()), state->Length());
+    snapshot.Buffer.resize(state->Length());
+    memcpy(snapshot.Buffer.data(), state->Buffer(), state->Length());
+
+    auto& snapshots = StateSnapshots[inst];
+    snapshots[frameNum] = std::move(snapshot);
+    while (snapshots.size() > 16)
+        snapshots.erase(snapshots.begin());
+
+    return snapshots[frameNum].Hash;
+}
+
 u32 Netplay::ComputeStateHash(NDS* nds)
 {
     if (!nds) return 0;
@@ -1060,6 +1086,37 @@ void Netplay::DumpDesyncState(NDS* nds, u32 frameNum, u32 localHash, u32 remoteH
                   path, state->Length());
 }
 
+void Netplay::DumpDesyncState(const std::vector<u8>& state, u32 frameNum, u32 localHash, u32 remoteHash)
+{
+    if (state.empty() || DesyncDumped) return;
+
+    const char* role = IsHost ? "host" : "client";
+    char path[256];
+    snprintf(path, sizeof(path), "netplay-desync-%s-frame-%u-local-%08X-remote-%08X.mln",
+             role, frameNum, localHash, remoteHash);
+
+    FILE* file = fopen(path, "wb");
+    if (!file)
+    {
+        Platform::Log(Platform::LogLevel::Error, "Netplay: failed to open desync dump '%s'\n", path);
+        return;
+    }
+
+    size_t written = fwrite(state.data(), 1, state.size(), file);
+    fclose(file);
+
+    if (written != state.size())
+    {
+        Platform::Log(Platform::LogLevel::Error, "Netplay: incomplete desync dump '%s' (%zu/%zu bytes)\n",
+                      path, written, state.size());
+        return;
+    }
+
+    DesyncDumped = true;
+    Platform::Log(Platform::LogLevel::Info, "Netplay: wrote cached desync savestate dump '%s' (%zu bytes)\n",
+                  path, state.size());
+}
+
 void Netplay::ReceiveInputs(ENetEvent &event, int inst)
 {
     if (!Active) return;
@@ -1089,16 +1146,38 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
     InstanceState& pending = PendingFrames[inst];
     NDS* nds = nds_instances[inst];
 
-    // Check for desync if a hash was provided.
-    if (remoteHash != 0 && nds && (nds->NumFrames == latestFrame))
+    // Check for desync if a hash was provided. Prefer an exact cached
+    // snapshot because packets can arrive after this instance has run ahead.
+    if (remoteHash != 0 && nds)
     {
-        u32 localHash = ComputeStateHash(nds);
+        u32 localHash = 0;
+        const std::vector<u8>* localState = nullptr;
 
-        if (localHash != remoteHash)
+        auto snapshotIt = StateSnapshots[inst].find(latestFrame);
+        if (snapshotIt != StateSnapshots[inst].end())
+        {
+            localHash = snapshotIt->second.Hash;
+            localState = &snapshotIt->second.Buffer;
+        }
+        else if (nds->NumFrames == latestFrame)
+        {
+            localHash = ComputeStateHash(nds);
+        }
+        else
+        {
+            Platform::Log(Platform::LogLevel::Info,
+                "Netplay: no cached state hash for remote frame %u (local frame %u, remote hash %08X)\n",
+                latestFrame, nds->NumFrames, remoteHash);
+        }
+
+        if (localHash != 0 && localHash != remoteHash)
         {
             Platform::Log(Platform::LogLevel::Error, "Netplay: DESYNC DETECTED at frame %u! (local: %08X, remote: %08X)\n",
                           latestFrame, localHash, remoteHash);
-            DumpDesyncState(nds, latestFrame, localHash, remoteHash);
+            if (localState)
+                DumpDesyncState(*localState, latestFrame, localHash, remoteHash);
+            else
+                DumpDesyncState(nds, latestFrame, localHash, remoteHash);
         }
     }
 
@@ -1232,7 +1311,9 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     u32 stateHash = 0;
     if ((nds->NumFrames % 60) == 0)
     {
-        stateHash = ComputeStateHash(nds);
+        Platform::Mutex_Lock(InstanceMutex);
+        stateHash = CaptureStateSnapshot(netplayID, nds, nds->NumFrames);
+        Platform::Mutex_Unlock(InstanceMutex);
     }
 
     // Send the inputs to other players
