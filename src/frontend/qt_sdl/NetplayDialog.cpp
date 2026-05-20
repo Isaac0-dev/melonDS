@@ -202,6 +202,7 @@ void NetplayDialog::done(int r)
 
 void NetplayDialog::timerEvent(QTimerEvent *event)
 {
+    netplay().Process();
     doUpdatePlayerList();
 }
 

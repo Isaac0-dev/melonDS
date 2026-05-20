@@ -94,6 +94,7 @@ public:
     int GetMaxPlayers() { return MaxPlayers; }
     bool GetHostStatus() { return IsHost; }
     Player GetMyPlayer() { return MyPlayer; }
+    bool GetMirrorStatus() { return MirrorMode; }
 
     void Process() override;
 
@@ -120,7 +121,7 @@ private:
     bool ReceivedInputThisFrame[16];
 
     int NumMirrorClients;
-    bool MirrorMode = false; // when true, use the prototype "mirror" behavior (hacky)
+    bool MirrorMode = false; // when true, use the prototype "mirror" behavior
 
     // maps to convert between player IDs and local instance IDs
     int PlayerToInstance[16];

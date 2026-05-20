@@ -1875,27 +1875,33 @@ bool MainWindow::netplayWarning(bool host)
         localEmuInstance->nds->Start();
         localEmuInstance->getEmuThread()->emuRun();
 
-        return; // todo DEV just to test with 1 ds, since it's so far more stable
+        if (netplay.GetMirrorStatus())
+            return;
+
         auto cart = localEmuInstance->nds->GetNDSCart();
 
         // create and start the new ds'
-        for (int i = 1; i < std::max(netplay.GetNumPlayers(), 2); ++i)
+        for (int i = 1; i < netplay.GetNumPlayers(); ++i)
         {
             EmuInstance *emuInstance = new EmuInstance(i, true);
             emuInstance->RegisterNetplayDS(i);
             emuInstance->updateConsole();
             netplay.RegisterInstance(i, emuInstance->nds);
 
-            auto newCart = std::make_unique<NDSCart::CartCommon>(
-                cart->GetROM(),
-                cart->GetROMLength(),
-                cart->ID(),
-                false, // assumes it's not a bad dump
-                cart->GetROMParams(),
-                (const melonDS::NDSCart::CartType) cart->Type(),
-                nullptr
-            );
-            emuInstance->nds->SetNDSCart(std::move(newCart));
+            if (cart != nullptr)
+            {
+                auto newCart = std::make_unique<NDSCart::CartCommon>(
+                    cart->GetROM(),
+                    cart->GetROMLength(),
+                    cart->ID(),
+                    false, // assumes it's not a bad dump
+                    cart->GetROMParams(),
+                    (const melonDS::NDSCart::CartType) cart->Type(),
+                    nullptr
+                );
+                emuInstance->nds->SetNDSCart(std::move(newCart));
+            }
+
             emuInstance->nds->Start();
             emuInstance->getEmuThread()->emuRun();
         }

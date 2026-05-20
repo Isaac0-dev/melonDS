@@ -90,7 +90,7 @@ Netplay::Netplay() noexcept : LocalMP(), Inited(false)
     memset(PlayerToInstance, 0, sizeof(PlayerToInstance));
     memset(InstanceToPlayer, 0, sizeof(InstanceToPlayer));
 
-    MirrorMode = true;
+    MirrorMode = false;
     NumMirrorClients = 0;
     for (int i = 0; i < 16; ++i)
     {
@@ -1565,7 +1565,12 @@ void Netplay::Process()
 
     for (int i = 0; i < 16; i++)
     {
-        if (!nds_instances[i]) continue;
+        if (!nds_instances[i])
+        {
+            // Always service network on instance 0 so the host can
+            // accept client connections even before a game is loaded.
+            if (i != 0) continue;
+        }
         ProcessFrame(i);
     }
     LocalMP::Process();
