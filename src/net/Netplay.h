@@ -200,6 +200,7 @@ private:
     InputFrame *GetInputFrame(u16 playerID, u32 frameNum);
 
     void ReceiveInputs(ENetEvent &event, int inst);
+    void ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum);
 
     bool SendBlob(int type, u32 len, u8* data);
     void RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst);

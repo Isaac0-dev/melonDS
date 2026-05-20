@@ -283,11 +283,6 @@ void EmuThread::run()
                 netplay.ApplyInput(emuInstance->netplayID, emuInstance->nds);
             }
 
-            if (emuInstance->isTouching)
-                emuInstance->nds->TouchScreen(emuInstance->touchX, emuInstance->touchY);
-            else
-                emuInstance->nds->ReleaseScreen();
-
             if (emuInstance->hotkeyPressed(HK_Lid))
             {
                 bool lid = !emuInstance->nds->IsLidClosed();
@@ -450,6 +445,14 @@ void EmuThread::run()
                 snprintf(melontitle, sizeof(melontitle), "[%d/%.0f] melonDS " MELONDS_VERSION, fps, actualfps);
                 changeWindowTitle(melontitle);
             }
+        }
+        else if (needLag)
+        {
+            // Netplay stall: yield briefly and re-poll for network packets.
+            // Using 2ms instead of the default 75ms pause keeps frame sync tight.
+            SDL_Delay(2);
+            handleMessages();
+            continue;
         }
         else
         {

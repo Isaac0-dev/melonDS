@@ -960,9 +960,6 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
     int index = GetPlayerIndexFromEndpoint(event.peer->address.host, event.peer->address.port);
     Platform::Mutex_Unlock(PlayersMutex);
     if (index == -1) return;
-    
-    // debug: show which endpoint maps to which index
-    if (MirrorMode) index = 1; // legacy prototype behaviour
 
     Platform::Mutex_Lock(InstanceMutex);
 
@@ -997,7 +994,7 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
 
         if (localHash != remoteHash)
         {
-            Platform::Log(Platform::LogLevel::Error, "Netplay: DESYNC DETECTED at frame %u! (local: %08X, remote: %08X)\n", 
+            Platform::Log(Platform::LogLevel::Error, "Netplay: DESYNC DETECTED at frame %u! (local: %08X, remote: %08X)\n",
                           latestFrame, localHash, remoteHash);
             // TODO: Trigger background resync
         }
@@ -1014,7 +1011,6 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
     size_t entryCount = remaining / sizeof(InputFrame);
 
     auto &playerHistory = InputHistory[index];
-    playerHistory.clear();
     for (size_t i = 0; i < entryCount; ++i) {
         const InputFrame* netFrame = reinterpret_cast<const InputFrame*>(ptr);
 
@@ -1033,6 +1029,12 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
     if (pending.Active && nds)
     {
         auto it = playerHistory.find(pending.FrameNum);
+        Platform::Log(Platform::LogLevel::Info,
+            "Netplay DEBUG: ReceiveInputs - pending.Active=1, pending.FrameNum=%u, "
+            "looking for frame in player %d history: %s, history size=%zu\n",
+            pending.FrameNum, index,
+            (it != playerHistory.end()) ? "FOUND" : "NOT FOUND",
+            playerHistory.size());
         if (it != playerHistory.end())
         {
             u32 prevWaitFrame = pending.FrameNum;
@@ -1041,42 +1043,51 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
 
             // load the save state (time it)
             u32 loadStartMS = Platform::GetMSCount();
+            pending.SavestateBuffer->Rewind(false);
             nds->DoSavestate(pending.SavestateBuffer.get());
             u32 loadEndMS = Platform::GetMSCount();
 
             nds->NumFrames = pending.FrameNum;
 
             // iterate over the frames until we reach the point we were at before
+            bool missedFrame = false;
             for (u32 i = nds->NumFrames; i < currFrame; ++i)
             {
-                if (it != playerHistory.end() && it->first == i)
-                {
-                    pending.FrameNum = i; // make sure this is our "last completed frame"
-                    InputFrame& frameData = it->second;
-                    nds->SetKeyMask(frameData.KeyMask);
-                    if (frameData.Touching) nds->TouchScreen(frameData.TouchX, frameData.TouchY);
-                    else nds->ReleaseScreen();
-                    ++it;
-                }
-                else if (!pending.Active)
-                {
-                    // there's still some frames we didn't get
-                    pending.Active = true;
-                    pending.FrameNum = i;
-                    pending.SavestateBuffer = std::make_unique<Savestate>();
-                    nds->DoSavestate(pending.SavestateBuffer.get());
-                }
-                else
-                {
-                    nds->SetKeyMask(0xFFF);
-                    nds->ReleaseScreen();
-                }
+                ApplyInputInternal(inst, nds, i);
                 nds->RunFrame();
+
+                if (!missedFrame)
+                {
+                    // check if we have inputs from every active player for this frame
+                    bool allHaveInputs = true;
+                    for (int p = 0; p < 16; p++)
+                    {
+                        if (Players[p].Status == Player_None) continue;
+                        if (!GetInputFrame(p, i))
+                        {
+                            allHaveInputs = false;
+                            break;
+                        }
+                    }
+                    if (!allHaveInputs)
+                    {
+                        missedFrame = true;
+                        pending.Active = true;
+                        pending.FrameNum = i;
+                        pending.SavestateBuffer = std::make_unique<Savestate>();
+                        nds->DoSavestate(pending.SavestateBuffer.get());
+                    }
+                }
             }
 
-            Platform::Log(Platform::LogLevel::Info, "Netplay: instance %d caught up %d frames. Current frame: %d, load_ms=%u\n", 
+            Platform::Log(Platform::LogLevel::Info, "Netplay: instance %d caught up %d frames. Current frame: %d, load_ms=%u\n",
                           inst, currFrame - prevWaitFrame, nds->NumFrames, (unsigned)(loadEndMS - loadStartMS));
         }
+    }
+    else if (!nds)
+    {
+        Platform::Log(Platform::LogLevel::Info,
+            "Netplay DEBUG: ReceiveInputs - nds is null for inst %d\n", inst);
     }
 
     ReceivedInputThisFrame[index] = true;
@@ -1169,6 +1180,7 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     Platform::Mutex_Lock(PlayersMutex);
     int lastCompletedFrame = -1;
     bool allOtherInputsReceived = true;
+    bool tooFarAhead = false;
     for (int i = 0; i < 16; ++i)
     {
         if (i == MyPlayer.ID) continue;
@@ -1183,13 +1195,42 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         {
             lastCompletedFrame = player.LastCompletedFrame;
         }
+
+        // Clock lock: if we are more than Delay+1 frames ahead of this
+        // player's last completed frame, we must stall to let them catch up.
+        // This prevents unbounded timeline drift between instances.
+        // Only check once we've received at least one frame update from
+        // this player (LastCompletedFrame > 0), otherwise we'd stall
+        // immediately on game start before any packets are exchanged.
+        if (player.LastCompletedFrame > 0 &&
+            nds->NumFrames > player.LastCompletedFrame + Settings.Delay + 1)
+        {
+            tooFarAhead = true;
+        }
     }
     Platform::Mutex_Unlock(PlayersMutex);
 
-    if (!allOtherInputsReceived)
+    // Host never stalls waiting for remote inputs -- it runs ahead and
+    // lets clients catch up via rollback. Only stall if tooFarAhead.
+    if (IsHost)
+    {
+        if (tooFarAhead)
+            StallFrame = true;
+    }
+    else if (!allOtherInputsReceived || tooFarAhead)
     {
         StallFrame = true;
     }
+
+    // clear received flags for next frame
+    Platform::Mutex_Lock(PlayersMutex);
+    for (int i = 0; i < 16; ++i)
+    {
+        Player &player = Players[i];
+        if (player.Status != Player_Client && player.Status != Player_Host) continue;
+        ReceivedInputThisFrame[i] = false;
+    }
+    Platform::Mutex_Unlock(PlayersMutex);
 
     // delete all the frames that everyone already have
     // to save memory and keep packet sizes down
@@ -1216,16 +1257,38 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         }
     }
 
-    if ((StallFrame || missingInputs) && nds->NumFrames > Settings.Delay && !pending.Active)
+    // DEBUG: log stall state periodically
+    static u32 stallLogCounter = 0;
+    if (StallFrame || missingInputs)
+    {
+        if ((stallLogCounter++ % 500) == 0)
+        {
+            Platform::Log(Platform::LogLevel::Info,
+                "Netplay DEBUG: ProcessInput stall - frame=%u, StallFrame=%d, missingInputs=%d, "
+                "allOtherInputsReceived=%d, tooFarAhead=%d, pending.Active=%d, pending.FrameNum=%u\n",
+                nds->NumFrames, (int)StallFrame, (int)missingInputs,
+                (int)allOtherInputsReceived, (int)tooFarAhead,
+                (int)pending.Active, pending.FrameNum);
+        }
+    }
+    else
+    {
+        stallLogCounter = 0;
+    }
+
+    // Host never saves checkpoints or stalls for missing inputs.
+    // It runs ahead; clients catch up via rollback.
+    if (!IsHost && (StallFrame || missingInputs) && nds->NumFrames > Settings.Delay && !pending.Active)
     {
         Platform::Mutex_Lock(InstanceMutex);
         pending.Active = true;
         pending.FrameNum = nds->NumFrames;
         pending.SavestateBuffer = std::make_unique<Savestate>();
         nds->DoSavestate(pending.SavestateBuffer.get());
-        StallFrame = false;
         Platform::Mutex_Unlock(InstanceMutex);
     }
+
+    StallFrame = false;
 }
 
 void Netplay::ApplyInput(int netplayID, NDS *nds)
@@ -1233,32 +1296,75 @@ void Netplay::ApplyInput(int netplayID, NDS *nds)
     // Update pointer map
     nds_instances[netplayID] = nds;
 
-    if (MirrorMode) netplayID = 1; // legacy prototype behaviour
+    ApplyInputInternal(netplayID, nds, nds->NumFrames);
+}
 
+void Netplay::ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum)
+{
     // clear inputs in case we return
     nds->SetKeyMask(0xFFF);
     nds->ReleaseScreen();
 
     Platform::Mutex_Lock(InstanceMutex);
-    InputFrame *frame = GetInputFrame(netplayID, nds->NumFrames);
-    if (!frame)
+    if (MirrorMode)
     {
-        // If we don't have inputs for this player yet, we'll likely hit the 
-        // stall/rollback logic in ProcessInput. For now, just return.
+        u32 keyMask = 0xFFF;
+        bool touching = false;
+        u16 touchX = 0, touchY = 0;
+
+        InputFrame *frame0 = GetInputFrame(0, frameNum);
+        InputFrame *frame1 = GetInputFrame(1, frameNum);
+
+        if (frame0)
+        {
+            keyMask &= frame0->KeyMask;
+            if (frame0->Touching)
+            {
+                touching = true;
+                touchX = frame0->TouchX;
+                touchY = frame0->TouchY;
+            }
+        }
+        if (frame1)
+        {
+            keyMask &= frame1->KeyMask;
+            if (frame1->Touching)
+            {
+                touching = true;
+                touchX = frame1->TouchX;
+                touchY = frame1->TouchY;
+            }
+        }
+
         Platform::Mutex_Unlock(InstanceMutex);
-        return;
+
+        nds->SetKeyMask(keyMask);
+        if (touching) nds->TouchScreen(touchX, touchY);
+        else          nds->ReleaseScreen();
+
+        // Track safe frame for this specific instance
+        PendingFrames[netplayID].FrameNum = frameNum;
     }
+    else
+    {
+        InputFrame *frame = GetInputFrame(netplayID, frameNum);
+        if (!frame)
+        {
+            Platform::Mutex_Unlock(InstanceMutex);
+            return;
+        }
 
-    InputFrame frameCopy = *frame;
-    Platform::Mutex_Unlock(InstanceMutex);
+        InputFrame frameCopy = *frame;
+        Platform::Mutex_Unlock(InstanceMutex);
 
-    // Track safe frame for this specific instance
-    PendingFrames[netplayID].FrameNum = nds->NumFrames;
+        // Track safe frame for this specific instance
+        PendingFrames[netplayID].FrameNum = frameNum;
 
-    // apply this input frame
-    nds->SetKeyMask(frameCopy.KeyMask);
-    if (frameCopy.Touching) nds->TouchScreen(frameCopy.TouchX, frameCopy.TouchY);
-    else                    nds->ReleaseScreen();
+        // apply this input frame
+        nds->SetKeyMask(frameCopy.KeyMask);
+        if (frameCopy.Touching) nds->TouchScreen(frameCopy.TouchX, frameCopy.TouchY);
+        else                    nds->ReleaseScreen();
+    }
 }
 
 void Netplay::Process()
