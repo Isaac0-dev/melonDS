@@ -65,6 +65,7 @@ Netplay::Netplay() noexcept : LocalMP(), Inited(false)
 {
     Active = false;
     IsHost = false;
+    GameInited = false;
     Host = nullptr;
     StallFrame = false;
     Settings.Delay = 4;
@@ -90,7 +91,7 @@ Netplay::Netplay() noexcept : LocalMP(), Inited(false)
     memset(PlayerToInstance, 0, sizeof(PlayerToInstance));
     memset(InstanceToPlayer, 0, sizeof(InstanceToPlayer));
 
-    MirrorMode = false;
+    MirrorMode = true;
     NumMirrorClients = 0;
     for (int i = 0; i < 16; ++i)
     {
@@ -131,8 +132,7 @@ Netplay::~Netplay() noexcept
 // To be called just before a game starts
 bool Netplay::InitGame()
 {
-    static bool isInited = false;
-    if (isInited) return true;
+    if (GameInited) return true;
 
     if (!OnStartEmulatorThread)
     {
@@ -142,7 +142,7 @@ bool Netplay::InitGame()
 
     OnStartEmulatorThread(); // Hack to access frontend code
 
-    isInited = true;
+    GameInited = true;
     return true;
 }
 
@@ -346,6 +346,7 @@ void Netplay::EndSession()
 {
     Active = false;
     StallFrame = false;
+    GameInited = false;
 
     Platform::Mutex_Lock(NetworkMutex);
     for (int i = 0; i < 16; i++)
@@ -376,6 +377,7 @@ void Netplay::EndSession()
         InputHistory[i].clear();
         StateSnapshots[i].clear();
         ReceivedInputThisFrame[i] = false;
+        ReusableStates[i].reset();
     }
     Platform::Mutex_Unlock(InstanceMutex);
 
@@ -549,6 +551,17 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
         InitGame();
 
         NDS* nds = nds_instances[inst];
+        if (!MirrorMode)
+        {
+            for (int i = 0; i < 16; i++)
+            {
+                if (nds_instances[i])
+                {
+                    nds = nds_instances[i];
+                    break;
+                }
+            }
+        }
         if (!nds) return;
 
         // reset
@@ -584,9 +597,18 @@ void Netplay::SyncClients()
 {
     if (!IsHost) return;
 
+    SyncInProgress = true;
+
+    Platform::Mutex_Lock(NetworkMutex);
+
     // assume instance 0 is the primary one being synced
     NDS* nds = nds_instances[0];
-    if (!nds) return;
+    if (!nds)
+    {
+        Platform::Mutex_Unlock(NetworkMutex);
+        SyncInProgress = false;
+        return;
+    }
 
     // send initial state
     std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
@@ -605,16 +627,31 @@ void Netplay::SyncClients()
     ENetEvent evt;
     while (enet_host_service(Host, &evt, 300000) > 0)
     {
-        if (evt.type == ENET_EVENT_TYPE_RECEIVE && evt.channelID == Chan_Blob)
+        if (evt.type == ENET_EVENT_TYPE_RECEIVE)
         {
-            if (evt.packet->dataLength == 1 && evt.packet->data[0] == 0x04)
-                ngood++;
-            enet_packet_destroy(evt.packet);
-        }
-        else
-        {
-            if (evt.type == ENET_EVENT_TYPE_RECEIVE)
+            if (evt.channelID == Chan_Blob)
+            {
+                if (evt.packet->dataLength == 1 && evt.packet->data[0] == 0x04)
+                    ngood++;
                 enet_packet_destroy(evt.packet);
+            }
+            else if (evt.channelID >= Chan_Input0 && evt.channelID < Chan_Cmd)
+            {
+                ReceiveInputs(evt, 0);
+                enet_packet_destroy(evt.packet);
+            }
+            else if (evt.channelID == Chan_Cmd)
+            {
+                enet_packet_destroy(evt.packet);
+            }
+            else
+            {
+                enet_packet_destroy(evt.packet);
+                break;
+            }
+        }
+        else if (evt.type == ENET_EVENT_TYPE_DISCONNECT)
+        {
             break;
         }
 
@@ -626,6 +663,8 @@ void Netplay::SyncClients()
         Platform::Log(Platform::LogLevel::Error, "!!! BAD!! %d %d\n", ngood, NumPlayers);
 
     Platform::Log(Platform::LogLevel::Info, "[HOST] clients synced\n");
+    Platform::Mutex_Unlock(NetworkMutex);
+    SyncInProgress = false;
 }
 
 void Netplay::StartGame()
@@ -640,15 +679,12 @@ void Netplay::StartGame()
 
     if (NumPlayers > 1)
     {
-        Platform::Mutex_Lock(NetworkMutex);
-
         SyncClients();
 
-        // tell remote peers to start game
+        Platform::Mutex_Lock(NetworkMutex);
         u8 cmd[1] = { Cmd_StartGame };
         ENetPacket* pkt = enet_packet_create(cmd, sizeof(cmd), ENET_PACKET_FLAG_RELIABLE);
         enet_host_broadcast(Host, Chan_Cmd, pkt);
-
         Platform::Mutex_Unlock(NetworkMutex);
     }
 
@@ -659,6 +695,10 @@ void Netplay::StartGame()
 void Netplay::StartLocal()
 {
     printf("starting netplay game\n");
+
+    // Pre-allocate reusable savestate buffers
+    for (int i = 0; i < 16; i++)
+        ReusableStates[i] = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
 
     // assign local instances to players
 
@@ -1209,10 +1249,10 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
 
         InputFrame frame;
         frame.FrameNum = ntohl(netFrame->FrameNum);
-        frame.KeyMask  = netFrame->KeyMask;
-        frame.Touching = netFrame->Touching;
-        frame.TouchX   = netFrame->TouchX;
-        frame.TouchY   = netFrame->TouchY;
+        frame.KeyMask  = ntohl(netFrame->KeyMask);
+        frame.Touching = ntohl(netFrame->Touching);
+        frame.TouchX   = ntohl(netFrame->TouchX);
+        frame.TouchY   = ntohl(netFrame->TouchY);
 
         playerHistory[frame.FrameNum] = frame;
 
@@ -1267,14 +1307,23 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
                         missedFrame = true;
                         pending.Active = true;
                         pending.FrameNum = i;
-                        pending.SavestateBuffer = std::make_unique<Savestate>();
-                        nds->DoSavestate(pending.SavestateBuffer.get());
+                        if (!ReusableStates[inst])
+                            ReusableStates[inst] = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
+                        ReusableStates[inst]->Rewind(true);
+                        nds->DoSavestate(ReusableStates[inst].get());
+                        pending.SavestateBuffer = std::move(ReusableStates[inst]);
                     }
                 }
             }
 
             Platform::Log(Platform::LogLevel::Info, "Netplay: instance %d caught up %d frames. Current frame: %d, load_ms=%u\n",
                           inst, currFrame - prevWaitFrame, nds->NumFrames, (unsigned)(loadEndMS - loadStartMS));
+
+            // After the rollback loop, recycle the now-current
+            // SavestateBuffer back to the reusable pool so it is
+            // available for the next snapshot.
+            if (pending.SavestateBuffer && !ReusableStates[inst])
+                ReusableStates[inst] = std::move(pending.SavestateBuffer);
         }
     }
     else if (!nds)
@@ -1353,6 +1402,10 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         for (auto& pair : InputHistory[MyPlayer.ID]) {
             InputFrame tmp = pair.second;
             tmp.FrameNum = htonl(tmp.FrameNum);
+            tmp.KeyMask  = htonl(tmp.KeyMask);
+            tmp.Touching = htonl(tmp.Touching);
+            tmp.TouchX   = htonl(tmp.TouchX);
+            tmp.TouchY   = htonl(tmp.TouchY);
             std::memcpy(ptr, &tmp, sizeof(InputFrame));
             ptr += sizeof(InputFrame);
         }
@@ -1361,8 +1414,16 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         Platform::Mutex_Lock(NetworkMutex);
         if (Host)
         {
-            ENetPacket* pkt = enet_packet_create(buffer.data(), buffer.size(), ENET_PACKET_FLAG_UNSEQUENCED);
-            enet_host_broadcast(Host, Chan_Input0 + MyPlayer.ID, pkt);
+            if (MirrorMode || IsHost)
+            {
+                ENetPacket* pkt = enet_packet_create(buffer.data(), buffer.size(), ENET_PACKET_FLAG_UNSEQUENCED);
+                enet_host_broadcast(Host, Chan_Input0 + MyPlayer.ID, pkt);
+            }
+            else if (RemotePeers[0])
+            {
+                ENetPacket* pkt = enet_packet_create(buffer.data(), buffer.size(), ENET_PACKET_FLAG_UNSEQUENCED);
+                enet_peer_send(RemotePeers[0], Chan_Input0 + MyPlayer.ID, pkt);
+            }
         }
         Platform::Mutex_Unlock(NetworkMutex);
     }
@@ -1467,18 +1528,20 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     }
 
     // Host never saves checkpoints or stalls for missing inputs.
-    // It runs ahead; clients catch up via rollback.
+    // It runs ahead; clients catch up via rollback. Clients save checkpoints
+    // so they can restore to a known-good state when the host's inputs arrive.
     if (!IsHost && (StallFrame || missingInputs) && nds->NumFrames > Settings.Delay && !pending.Active)
     {
         Platform::Mutex_Lock(InstanceMutex);
         pending.Active = true;
         pending.FrameNum = nds->NumFrames;
-        pending.SavestateBuffer = std::make_unique<Savestate>();
-        nds->DoSavestate(pending.SavestateBuffer.get());
+        if (!ReusableStates[netplayID])
+            ReusableStates[netplayID] = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
+        ReusableStates[netplayID]->Rewind(true);
+        nds->DoSavestate(ReusableStates[netplayID].get());
+        pending.SavestateBuffer = std::move(ReusableStates[netplayID]);
         Platform::Mutex_Unlock(InstanceMutex);
     }
-
-    // Keep StallFrame visible to EmuThread for this iteration.
 }
 
 void Netplay::ApplyInput(int netplayID, NDS *nds)
@@ -1539,7 +1602,8 @@ void Netplay::ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum)
     }
     else
     {
-        InputFrame *frame = GetInputFrame(netplayID, frameNum);
+        int globalPlayerID = InstanceToPlayer[netplayID];
+        InputFrame *frame = GetInputFrame(globalPlayerID, frameNum);
         if (!frame)
         {
             Platform::Mutex_Unlock(InstanceMutex);

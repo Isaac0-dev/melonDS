@@ -202,7 +202,10 @@ void NetplayDialog::done(int r)
 
 void NetplayDialog::timerEvent(QTimerEvent *event)
 {
-    netplay().Process();
+    // Only poll network from the timer if the game loop isn't running yet.
+    // Once game instances exist, the EmuThread handles Process() instead.
+    if (!netplay().HasGameInstances())
+        netplay().Process();
     doUpdatePlayerList();
 }
 

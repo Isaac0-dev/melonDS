@@ -1886,6 +1886,7 @@ bool MainWindow::netplayWarning(bool host)
             EmuInstance *emuInstance = new EmuInstance(i, true);
             emuInstance->RegisterNetplayDS(i);
             emuInstance->updateConsole();
+            assert(emuInstance->nds != nullptr);
             netplay.RegisterInstance(i, emuInstance->nds);
 
             if (cart != nullptr)
@@ -1900,6 +1901,11 @@ bool MainWindow::netplayWarning(bool host)
                     nullptr
                 );
                 emuInstance->nds->SetNDSCart(std::move(newCart));
+            }
+            else
+            {
+                QString msgError;
+                emuInstance->bootToMenu(msgError);
             }
 
             emuInstance->nds->Start();

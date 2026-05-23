@@ -102,11 +102,13 @@ public:
     void ApplyInput(int netplayID, NDS *nds);
 
     void RegisterInstance(int id, NDS* nds) { if (id >= 0 && id < 16) nds_instances[id] = nds; }
+    bool HasGameInstances() { for (int i = 0; i < 16; i++) if (nds_instances[i]) return true; return false; }
 
 private:
     bool Inited;
     bool Active;
     bool IsHost;
+    bool GameInited;
 
     ENetHost* Host;
     ENetPeer* RemotePeers[16];
@@ -122,6 +124,10 @@ private:
 
     int NumMirrorClients;
     bool MirrorMode = false; // when true, use the prototype "mirror" behavior
+
+    // Set during SyncClients() to prevent the EmuThread from accessing
+    // the ENet host from another thread (ENet is not thread-safe).
+    bool SyncInProgress = false;
 
     // maps to convert between player IDs and local instance IDs
     int PlayerToInstance[16];
@@ -163,6 +169,11 @@ private:
         std::unique_ptr<Savestate> SavestateBuffer;
     };
     InstanceState PendingFrames[16];
+
+    // Pre-allocated reusable savestate buffers to avoid per-frame
+    // heap allocations during rollback. Rewind() resets the cursor
+    // so the same memory block is reused.
+    std::unique_ptr<Savestate> ReusableStates[16];
 
     Platform::Mutex* InstanceMutex;
     Platform::Mutex* NetworkMutex;
