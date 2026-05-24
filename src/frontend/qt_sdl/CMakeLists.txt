@@ -192,6 +192,8 @@ else()
 endif()
 target_link_libraries(melonDS PRIVATE core)
 target_link_libraries(melonDS PRIVATE PkgConfig::SDL2 PkgConfig::LibArchive PkgConfig::Zstd PkgConfig::Faad)
+find_package(ZLIB REQUIRED)
+target_link_libraries(melonDS PRIVATE ZLIB::ZLIB)
 target_link_libraries(melonDS PRIVATE ${QT_LINK_LIBS} ${CMAKE_DL_LIBS})
 
 if (WIN32)
