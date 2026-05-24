@@ -101,6 +101,7 @@ private slots:
     void on_btnStartGame_clicked();
     void on_btnLeaveGame_clicked();
     void on_spnInputBufferSize_valueChanged(int value);
+    void on_cmbSyncMode_currentIndexChanged(int value);
     void done(int r);
 
     void doUpdatePlayerList();

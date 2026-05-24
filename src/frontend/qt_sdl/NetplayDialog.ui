@@ -40,19 +40,45 @@
        </property>
       </widget>
      </item>
-     <item>
-      <widget class="QSpinBox" name="spnInputBufferSize">
-       <property name="minimum">
-         <number>0</number>
-       </property>
-       <property name="maximum">
-        <number>60</number>
-       </property>
-       <property name="value">
-        <number>4</number>
-       </property>
-      </widget>
-     </item>
+<item>
+       <widget class="QSpinBox" name="spnInputBufferSize">
+        <property name="minimum">
+          <number>0</number>
+        </property>
+        <property name="maximum">
+         <number>60</number>
+        </property>
+        <property name="value">
+         <number>4</number>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="lblSyncMode">
+        <property name="text">
+         <string>Sync:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QComboBox" name="cmbSyncMode">
+        <item>
+         <property name="text">
+          <string>Rollback</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Predictive</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Lockstep</string>
+         </property>
+        </item>
+       </widget>
+      </item>
      <item>
       <spacer name="horizontalSpacer">
        <property name="orientation">
@@ -68,11 +94,18 @@
      </item>
     </layout>
    </item>
-   <item>
-    <widget class="QTreeView" name="tvPlayerList"/>
-   </item>
-  </layout>
- </widget>
- <resources/>
- <connections/>
-</ui>
+<item>
+     <widget class="QTreeView" name="tvPlayerList"/>
+    </item>
+    <item>
+     <widget class="QLabel" name="lblDiagnostics">
+      <property name="text">
+       <string/>
+      </property>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+  <resources/>
+  <connections/>
+ </ui>

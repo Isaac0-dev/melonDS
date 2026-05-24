@@ -33,8 +33,32 @@
 #include <chrono>
 
 
-namespace melonDS
+namespace melonDS {
+
+struct TimedLock
 {
+    Platform::Mutex* M;
+    u64 Start;
+    const char* LockName;
+
+    TimedLock(Platform::Mutex* m, const char* name)
+    {
+        M = m;
+        LockName = name;
+        Start = Platform::GetMSCount();
+        Platform::Mutex_Lock(M);
+    }
+
+    ~TimedLock()
+    {
+        u64 held = Platform::GetMSCount() - Start;
+        if (held > 5)
+        {
+            Platform::Log(Platform::LogLevel::Warn, "[PERF] %s Mutex held too long: %llums\n", LockName, held);
+        }
+        Platform::Mutex_Unlock(M);
+    }
+};
 
 const u32 kNetplayMagic = 0x5054454E; // NETP
 
@@ -404,6 +428,13 @@ void Netplay::SetInputBufferSize(int value)
     SendNetworkSettings();
 }
 
+void Netplay::SetSyncMethod(SyncMethod method)
+{
+    if (!IsHost) return;
+    Settings.SyncMode = (int)method;
+    SendNetworkSettings();
+}
+
 bool Netplay::SendBlob(int type, u32 len, u8* data)
 {
     u8* buf = ChunkBuffer;
@@ -599,71 +630,86 @@ void Netplay::SyncClients()
 
     SyncInProgress = true;
 
-    Platform::Mutex_Lock(NetworkMutex);
-
-    // assume instance 0 is the primary one being synced
-    NDS* nds = nds_instances[0];
-    if (!nds)
+    // Scope block to acquire initial snapshot and broadcast state safely
     {
-        Platform::Mutex_Unlock(NetworkMutex);
-        SyncInProgress = false;
-        return;
+        TimedLock lock(NetworkMutex, "SyncClients_Init");
+
+        NDS* nds = nds_instances[0];
+        if (!nds)
+        {
+            SyncInProgress = false;
+            return;
+        }
+
+        std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
+        nds->DoSavestate(state.get());
+        Platform::Log(Platform::LogLevel::Info, "[HOST] syncing clients. sending save state with size %d\n", state->Length());
+        SendBlob(Blob_InitState, state->Length(), (u8 *) state->Buffer());
+
+        u8 data[2];
+        data[0] = 0x04;
+        data[1] = (u8) nds->ConsoleType;
+        ENetPacket* pkt = enet_packet_create(&data, 2, ENET_PACKET_FLAG_RELIABLE);
+        enet_host_broadcast(Host, Chan_Blob, pkt);
     }
 
-    // send initial state
-    std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
-    nds->DoSavestate(state.get());
-    Platform::Log(Platform::LogLevel::Info, "[HOST] syncing clients. sending save state with size %d\n", state->Length());
-    SendBlob(Blob_InitState, state->Length(), (u8 *) state->Buffer());
-
-    u8 data[2];
-    data[0] = 0x04;
-    data[1] = (u8) nds->ConsoleType;
-    ENetPacket* pkt = enet_packet_create(&data, 2, ENET_PACKET_FLAG_RELIABLE);
-    enet_host_broadcast(Host, Chan_Blob, pkt);
-
-    // wait for all clients to have caught up
     int ngood = 0;
     ENetEvent evt;
-    while (enet_host_service(Host, &evt, 300000) > 0)
+
+    // Main polling loop runs with granular locking per service turn
+    while (ngood < (NumPlayers - 1))
     {
-        if (evt.type == ENET_EVENT_TYPE_RECEIVE)
+        int result = 0;
+        
+        // Granular ENet lock: only hold while querying the socket
         {
-            if (evt.channelID == Chan_Blob)
+            TimedLock netLock(NetworkMutex, "SyncClients_Service");
+            result = enet_host_service(Host, &evt, 50); 
+        }
+
+        if (result > 0)
+        {
+            if (evt.type == ENET_EVENT_TYPE_RECEIVE)
             {
-                if (evt.packet->dataLength == 1 && evt.packet->data[0] == 0x04)
-                    ngood++;
-                enet_packet_destroy(evt.packet);
+                if (evt.channelID == Chan_Blob)
+                {
+                    if (evt.packet->dataLength == 1 && evt.packet->data[0] == 0x04)
+                    {
+                        ngood++;
+                    }
+                    enet_packet_destroy(evt.packet);
+                }
+                else if (evt.channelID >= Chan_Input0 && evt.channelID < Chan_Cmd)
+                {
+                    // ReceiveInputs handles its own InstanceMutex locking internally
+                    ReceiveInputs(evt, 0);
+                    enet_packet_destroy(evt.packet);
+                }
+                else
+                {
+                    enet_packet_destroy(evt.packet);
+                }
             }
-            else if (evt.channelID >= Chan_Input0 && evt.channelID < Chan_Cmd)
+            else if (evt.type == ENET_EVENT_TYPE_DISCONNECT)
             {
-                ReceiveInputs(evt, 0);
-                enet_packet_destroy(evt.packet);
-            }
-            else if (evt.channelID == Chan_Cmd)
-            {
-                enet_packet_destroy(evt.packet);
-            }
-            else
-            {
-                enet_packet_destroy(evt.packet);
+                Platform::Log(Platform::LogLevel::Error, "[HOST] Client disconnected during synchronization handshake.\n");
                 break;
             }
         }
-        else if (evt.type == ENET_EVENT_TYPE_DISCONNECT)
-        {
-            break;
-        }
-
-        if (ngood >= (NumPlayers-1))
+        
+        if (!Active) 
             break;
     }
 
-    if (ngood != (NumPlayers-1))
-        Platform::Log(Platform::LogLevel::Error, "!!! BAD!! %d %d\n", ngood, NumPlayers);
+    if (ngood != (NumPlayers - 1))
+    {
+        Platform::Log(Platform::LogLevel::Error, "!!! SYNC FAILED !! Acknowledged: %d / Expected: %d\n", ngood, NumPlayers - 1);
+    }
+    else
+    {
+        Platform::Log(Platform::LogLevel::Info, "[HOST] All clients successfully synchronized.\n");
+    }
 
-    Platform::Log(Platform::LogLevel::Info, "[HOST] clients synced\n");
-    Platform::Mutex_Unlock(NetworkMutex);
     SyncInProgress = false;
 }
 
@@ -1319,6 +1365,10 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
             Platform::Log(Platform::LogLevel::Info, "Netplay: instance %d caught up %d frames. Current frame: %d, load_ms=%u\n",
                           inst, currFrame - prevWaitFrame, nds->NumFrames, (unsigned)(loadEndMS - loadStartMS));
 
+            int depth = (int)(currFrame - prevWaitFrame);
+            if (depth > Diag.MaxRollbackDepth)
+                Diag.MaxRollbackDepth = depth;
+
             // After the rollback loop, recycle the now-current
             // SavestateBuffer back to the reusable pool so it is
             // available for the next snapshot.
@@ -1461,6 +1511,25 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
             tooFarAhead = true;
         }
     }
+
+    // Update telemetry diagnostics
+    Diag.LocalFrameNum = nds->NumFrames;
+    int minPeerFrame = -1;
+    for (int i = 0; i < 16; ++i)
+    {
+        if (i == MyPlayer.ID) continue;
+        Player &player = Players[i];
+        if (player.Status != Player_Client && player.Status != Player_Host) continue;
+        if (player.LastCompletedFrame > 0)
+        {
+            int drift = (int)nds->NumFrames - (int)player.LastCompletedFrame;
+            if (drift > Diag.TimelineDrift)
+                Diag.TimelineDrift = drift;
+            if (minPeerFrame == -1 || (int)player.LastCompletedFrame < minPeerFrame)
+                minPeerFrame = (int)player.LastCompletedFrame;
+        }
+    }
+    Diag.PeerLastCompletedFrame = (minPeerFrame >= 0) ? (u32)minPeerFrame : 0;
     Platform::Mutex_Unlock(PlayersMutex);
 
     // clear received flags for next frame
@@ -1499,11 +1568,10 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     }
 
     // Host never stalls -- it runs ahead and lets clients catch up via
-    // rollback. Clients should only stall when the exact frame they need is
-    // unavailable, or when clock-lock says they are too far ahead. A packet
-    // not arriving during this frontend loop iteration is not itself a
-    // reason to stop emulation.
-    if (!IsHost && (missingInputs || tooFarAhead))
+    // rollback. Clients stall when missing inputs or clock-locked.
+    // In StrictLockstep mode, host also stalls.
+    if ((!IsHost || Settings.SyncMode == Sync_StrictLockstep) &&
+        (missingInputs || tooFarAhead))
     {
         StallFrame = true;
     }
@@ -1527,10 +1595,26 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         stallLogCounter = 0;
     }
 
-    // Host never saves checkpoints or stalls for missing inputs.
-    // It runs ahead; clients catch up via rollback. Clients save checkpoints
-    // so they can restore to a known-good state when the host's inputs arrive.
-    if (!IsHost && (StallFrame || missingInputs) && nds->NumFrames > Settings.Delay && !pending.Active)
+    // Determine if this frame requires a synchronization checkpoint
+    bool shouldCheckpoint = false;
+    if (Settings.SyncMode == Sync_PureRollback)
+        shouldCheckpoint = !IsHost;
+    else if (Settings.SyncMode == Sync_PredictiveHost)
+        shouldCheckpoint = !IsHost || missingInputs;
+    else // Sync_StrictLockstep
+        shouldCheckpoint = true;
+
+    // For Predictive Host mode at low delay, allow the host to update its 
+    // pending checkpoint frame forward if it is running ahead blindly, 
+    // ensuring it doesn't hold an obsolete snapshot.
+    bool canCapture = !pending.Active;
+    if (IsHost && Settings.SyncMode == Sync_PredictiveHost && missingInputs)
+    {
+        canCapture = true; // Force override to refresh the rolling window
+    }
+
+    if (shouldCheckpoint && (StallFrame || missingInputs) &&
+        nds->NumFrames > Settings.Delay && canCapture)
     {
         Platform::Mutex_Lock(InstanceMutex);
         pending.Active = true;
@@ -1658,6 +1742,11 @@ void Netplay::Process()
 
         Platform::Mutex_Unlock(PlayersMutex);
     }
+}
+
+Netplay::Diagnostics Netplay::GetDiagnostics()
+{
+    return Diag;
 }
 
 }

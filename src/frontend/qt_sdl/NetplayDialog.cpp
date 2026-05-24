@@ -138,6 +138,11 @@ void NetplayDialog::on_spnInputBufferSize_valueChanged(int value)
     netplay().SetInputBufferSize(value);
 }
 
+void NetplayDialog::on_cmbSyncMode_currentIndexChanged(int value)
+{
+    netplay().SetSyncMethod((Netplay::SyncMethod)value);
+}
+
 NetplayDialog::NetplayDialog(QWidget* parent) : QDialog(parent), ui(new Ui::NetplayDialog)
 {
     ui->setupUi(this);
@@ -150,6 +155,9 @@ NetplayDialog::NetplayDialog(QWidget* parent) : QDialog(parent), ui(new Ui::Netp
     ui->btnStartGame->setVisible(isHost);
     ui->lblInputBufferSize->setVisible(isHost);
     ui->spnInputBufferSize->setVisible(isHost);
+    ui->lblSyncMode->setVisible(isHost);
+    ui->cmbSyncMode->setVisible(isHost);
+    ui->cmbSyncMode->setCurrentIndex((int)netplay().GetSyncMethod());
 
     EmuInstance *emuInstance = ((MainWindow*)parent)->getEmuInstance();
     netplay().RegisterInstance(emuInstance->getInstanceID(), emuInstance->getNDS());
@@ -207,6 +215,14 @@ void NetplayDialog::timerEvent(QTimerEvent *event)
     if (!netplay().HasGameInstances())
         netplay().Process();
     doUpdatePlayerList();
+
+    Netplay::Diagnostics diag = netplay().GetDiagnostics();
+    QString text;
+    if (diag.LocalFrameNum > 0 || diag.PeerLastCompletedFrame > 0)
+        text = QString("Lcl %1 \u00b7 Peer %2 \u00b7 Drift %3 \u00b7 Rlbk %4")
+            .arg(diag.LocalFrameNum).arg(diag.PeerLastCompletedFrame)
+            .arg(diag.TimelineDrift).arg(diag.MaxRollbackDepth);
+    ui->lblDiagnostics->setText(text);
 }
 
 void NetplayDialog::doUpdatePlayerList()

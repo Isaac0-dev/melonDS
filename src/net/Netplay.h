@@ -87,6 +87,15 @@ public:
 
     void SetInputBufferSize(int value);
 
+    enum SyncMethod {
+        Sync_PureRollback = 0,
+        Sync_PredictiveHost = 1,
+        Sync_StrictLockstep = 2,
+    };
+
+    void SetSyncMethod(SyncMethod method);
+    SyncMethod GetSyncMethod() { return (SyncMethod)Settings.SyncMode; }
+
     void StartGame();
 
     std::vector<Player> GetPlayerList();
@@ -103,6 +112,25 @@ public:
 
     void RegisterInstance(int id, NDS* nds) { if (id >= 0 && id < 16) nds_instances[id] = nds; }
     bool HasGameInstances() { for (int i = 0; i < 16; i++) if (nds_instances[i]) return true; return false; }
+
+struct NetworkSettings
+    {
+        u32 Delay;
+        int SyncMode = Sync_PureRollback;
+    };
+
+    NetworkSettings Settings;
+
+    struct Diagnostics
+    {
+        u32 LocalFrameNum = 0;
+        u32 PeerLastCompletedFrame = 0;
+        int TimelineDrift = 0;
+        int MaxRollbackDepth = 0;
+        u32 PacketsDroppedOrLate = 0;
+    };
+
+    Diagnostics GetDiagnostics();
 
 private:
     bool Inited;
@@ -123,24 +151,15 @@ private:
     bool ReceivedInputThisFrame[16];
 
     int NumMirrorClients;
-    bool MirrorMode = false; // when true, use the prototype "mirror" behavior
+    bool MirrorMode = false;
 
-    // Set during SyncClients() to prevent the EmuThread from accessing
-    // the ENet host from another thread (ENet is not thread-safe).
     bool SyncInProgress = false;
 
-    // maps to convert between player IDs and local instance IDs
     int PlayerToInstance[16];
     int InstanceToPlayer[16];
-    // map remote endpoint (host<<32 | port) to player index
     std::unordered_map<u64, u8> PortToPlayerIndex;
 
-    struct NetworkSettings
-    {
-        u32 Delay;
-    };
-
-    NetworkSettings Settings;
+    Diagnostics Diag;
 
     struct InputFrame
     {
@@ -155,12 +174,10 @@ private:
         u8 stallFrame;
         u32 seq;
         u32 frameIndex;
-        u32 lastCompleteFrame; // The last frame index that we have everyone's inputs for
-        u32 stateHash;         // Hash of the core state for desync detection
+        u32 lastCompleteFrame;
+        u32 stateHash;
     };
 #pragma pack(pop)
-
-    std::map<u32, InputFrame> InputHistory[16];
 
     struct InstanceState
     {
@@ -168,26 +185,40 @@ private:
         u32 FrameNum;
         std::unique_ptr<Savestate> SavestateBuffer;
     };
-    InstanceState PendingFrames[16];
-
-    // Pre-allocated reusable savestate buffers to avoid per-frame
-    // heap allocations during rollback. Rewind() resets the cursor
-    // so the same memory block is reused.
-    std::unique_ptr<Savestate> ReusableStates[16];
-
-    Platform::Mutex* InstanceMutex;
-    Platform::Mutex* NetworkMutex;
-    u32 PacketSequenceCounter;
-    bool DesyncDumped;
 
     struct StateSnapshot
     {
         u32 Hash;
         std::shared_ptr<std::vector<u8>> Buffer;
     };
-    std::map<u32, StateSnapshot> StateSnapshots[16];
 
-    // Array of NDS pointers for each local instance
+    bool InitGame();
+    void SyncClients();
+    void SendNetworkSettings();
+    void StartLocal();
+    void ProcessHost(int inst);
+    void ProcessClient(int inst);
+    void ProcessFrame(int inst);
+    int GetPlayerIndexFromEndpoint(u32 host, u16 port);
+    InputFrame *GetInputFrame(u16 playerID, u32 frameNum);
+    void ReceiveInputs(ENetEvent &event, int inst);
+    void ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum);
+    u32 CaptureStateSnapshot(int inst, NDS* nds, u32 frameNum);
+    void StoreStateSnapshot(int inst, u32 frameNum, const StateSnapshot& snapshot);
+    u32 ComputeStateHash(NDS* nds);
+    void DumpDesyncState(NDS* nds, u32 frameNum, u32 localHash, u32 remoteHash);
+    void DumpDesyncState(const std::vector<u8>& state, u32 frameNum, u32 localHash, u32 remoteHash);
+    bool SendBlob(int type, u32 len, u8* data);
+    void RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst);
+
+    std::map<u32, InputFrame> InputHistory[16];
+    InstanceState PendingFrames[16];
+    std::unique_ptr<Savestate> ReusableStates[16];
+    Platform::Mutex* InstanceMutex;
+    Platform::Mutex* NetworkMutex;
+    u32 PacketSequenceCounter;
+    bool DesyncDumped;
+    std::map<u32, StateSnapshot> StateSnapshots[16];
     NDS* nds_instances[16];
 
     enum
@@ -195,7 +226,6 @@ private:
         Blob_CartROM = 0,
         Blob_CartSRAM,
         Blob_InitState,
-
         Blob_MAX
     };
 
@@ -206,31 +236,6 @@ private:
     u32 CurBlobLen;
     u32 CurBlobCRC = 0;
     u32 BlobCurrSize;
-
-    bool InitGame();
-
-    void SyncClients();
-
-    void SendNetworkSettings();
-
-    void StartLocal();
-    void ProcessHost(int inst);
-    void ProcessClient(int inst);
-    void ProcessFrame(int inst);
-
-    int GetPlayerIndexFromEndpoint(u32 host, u16 port);
-    InputFrame *GetInputFrame(u16 playerID, u32 frameNum);
-
-    void ReceiveInputs(ENetEvent &event, int inst);
-    void ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum);
-    u32 CaptureStateSnapshot(int inst, NDS* nds, u32 frameNum);
-    void StoreStateSnapshot(int inst, u32 frameNum, const StateSnapshot& snapshot);
-    u32 ComputeStateHash(NDS* nds);
-    void DumpDesyncState(NDS* nds, u32 frameNum, u32 localHash, u32 remoteHash);
-    void DumpDesyncState(const std::vector<u8>& state, u32 frameNum, u32 localHash, u32 remoteHash);
-
-    bool SendBlob(int type, u32 len, u8* data);
-    void RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst);
 };
 
 }
