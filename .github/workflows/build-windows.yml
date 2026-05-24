@@ -26,6 +26,8 @@ jobs:
     steps:
     - name: Check out sources
       uses: actions/checkout@v3
+      with:
+        fetch-depth: 1
     - name: Set up MSYS2
       uses: msys2/setup-msys2@v2
       with:
@@ -42,10 +44,11 @@ jobs:
       uses: lukka/run-vcpkg@v11
       with:
         vcpkgJsonGlob: vcpkg.json
+        appendedCacheKeySuffix: ${{ hashFiles('vcpkg.json') }}
     - name: Configure
       run: cmake --preset=release-mingw-x86_64 -DMELONDS_EMBED_BUILD_INFO=ON
     - name: Build
-      run: cmake --build --preset=release-mingw-x86_64
+      run: cmake --build --preset=release-mingw-x86_64 --parallel 4
     - uses: actions/upload-artifact@v4
       with:
         name: melonDS-windows-x86_64
