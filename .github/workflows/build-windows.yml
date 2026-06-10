@@ -36,6 +36,7 @@ jobs:
     - name: Restore vcpkg cache
       uses: actions/cache/restore@v4
       with:
+        submodules: recursive
         path: ${{ github.workspace }}/vcpkg_cache
         key: vcpkg-${{ matrix.arch.name }}-windows-${{ hashFiles('vcpkg.json') }}
         restore-keys: vcpkg-${{ matrix.arch.name }}-windows-
