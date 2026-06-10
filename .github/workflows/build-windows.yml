@@ -28,8 +28,9 @@ jobs:
 
     name: ${{ matrix.arch.name }}
     runs-on: ${{ matrix.arch.image }}
-    env:
-      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg_cache,readwrite
+    timeout-minutes: 150
+    # env:
+    #   VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg_cache,readwrite
     steps:
     - name: Check out sources
       uses: actions/checkout@v6
