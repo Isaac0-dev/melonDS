@@ -1,5 +1,4 @@
 name: Windows
-
 on:
   push:
     branches:
@@ -8,13 +7,10 @@ on:
   pull_request:
     branches:
       - master
-
 env:
   MELONDS_GIT_BRANCH: ${{ github.ref }}
   MELONDS_GIT_HASH: ${{ github.sha }}
   MELONDS_BUILD_PROVIDER: GitHub Actions
-#  MELONDS_VERSION_SUFFIX: " RC"
-
 jobs:
   build:
     runs-on: windows-2025
@@ -46,7 +42,7 @@ jobs:
         vcpkgJsonGlob: vcpkg.json
         appendedCacheKeySuffix: ${{ hashFiles('vcpkg.json') }}
     - name: Configure
-      run: cmake --preset=release-mingw-x86_64 -DMELONDS_EMBED_BUILD_INFO=ON
+      run: cmake --preset=release-mingw-x86_64 -DMELONDS_EMBED_BUILD_INFO=ON -DCMAKE_EXE_LINKER_FLAGS="-lz"
     - name: Build
       run: cmake --build --preset=release-mingw-x86_64 --parallel 4
     - uses: actions/upload-artifact@v4
