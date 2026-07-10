@@ -148,7 +148,6 @@ private:
 
     Player MyPlayer;
     u32 HostAddress;
-    bool ReceivedInputThisFrame[16];
 
     int NumMirrorClients;
     bool MirrorMode = false;
@@ -193,7 +192,7 @@ private:
     };
 
     bool InitGame();
-    void SyncClients();
+    bool SyncClients();
     void SendNetworkSettings();
     void StartLocal();
     void ProcessHost(int inst);

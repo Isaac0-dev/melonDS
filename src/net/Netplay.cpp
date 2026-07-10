@@ -119,7 +119,6 @@ Netplay::Netplay() noexcept : LocalMP(), Inited(false)
     NumMirrorClients = 0;
     for (int i = 0; i < 16; ++i)
     {
-        ReceivedInputThisFrame[i] = false;
         PendingFrames[i].Active = false;
         PendingFrames[i].FrameNum = 0;
         PendingFrames[i].SavestateBuffer = nullptr;
@@ -400,10 +399,21 @@ void Netplay::EndSession()
         nds_instances[i] = nullptr;
         InputHistory[i].clear();
         StateSnapshots[i].clear();
-        ReceivedInputThisFrame[i] = false;
         ReusableStates[i].reset();
     }
     Platform::Mutex_Unlock(InstanceMutex);
+
+    for (int i = 0; i < Blob_MAX; i++)
+    {
+        if (Blobs[i])
+        {
+            delete[] Blobs[i];
+            Blobs[i] = nullptr;
+        }
+        BlobLens[i] = 0;
+    }
+    CurBlobType = -1;
+    CurBlobLen = 0;
 
     PortToPlayerIndex.clear();
 }
@@ -437,6 +447,8 @@ void Netplay::SetSyncMethod(SyncMethod method)
 
 bool Netplay::SendBlob(int type, u32 len, u8* data)
 {
+    if (!Host) return false;
+
     u8* buf = ChunkBuffer;
 
     buf[0] = 0x01;
@@ -488,52 +500,47 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
     u8* buf = pkt->data;
     if (buf[0] == 0x01)
     {
-        if (CurBlobType != -1) return;
         if (pkt->dataLength != 12) return;
 
         int type = buf[1];
-        if (type > Blob_MAX) return;
+        if (type >= Blob_MAX) return;
 
         u32 len = *(u32*)&buf[4];
         if (len > 0x40000000) return;
 
-        if (Blobs[type] != nullptr) return;
-        if (BlobLens[type] != 0) return;
+        // Clean up previous incomplete/stale blob if any
+        if (CurBlobType != -1)
+        {
+            Platform::Log(Platform::LogLevel::Warn, "Netplay: Starting new blob %d while previous blob %d was incomplete, cleaning up.\n", type, CurBlobType);
+            if (Blobs[CurBlobType])
+            {
+                delete[] Blobs[CurBlobType];
+                Blobs[CurBlobType] = nullptr;
+            }
+            BlobLens[CurBlobType] = 0;
+            CurBlobType = -1;
+        }
+
+        // Clean up existing completed blob of the same type if not already processed/freed
+        if (Blobs[type] != nullptr)
+        {
+            delete[] Blobs[type];
+            Blobs[type] = nullptr;
+        }
+        BlobLens[type] = 0;
+
         Platform::Log(Platform::LogLevel::Info, "Netplay: starting blob transfer, type %d, len %d\n", type, len);
         if (len) Blobs[type] = new u8[len];
         BlobLens[type] = len;
 
         CurBlobType = type;
         CurBlobLen = len;
-
-        CurBlobCRC  = crc32(0L, Z_NULL, 0);
-
+        CurBlobCRC = crc32(0L, Z_NULL, 0);
         BlobCurrSize = 0;
-
-        ENetEvent evt;
-        while (enet_host_service(Host, &evt, 5000) > 0)
-        {
-            if (evt.type == ENET_EVENT_TYPE_RECEIVE && evt.channelID == Chan_Blob)
-            {
-                RecvBlob(evt.peer, evt.packet, inst);
-                bool blobDone = evt.packet->dataLength >= 1 && evt.packet->data[0] == 0x03;
-                enet_packet_destroy(evt.packet);
-                if (blobDone)
-                {
-                    break;
-                }
-            }
-            else
-            {
-                if (evt.type == ENET_EVENT_TYPE_RECEIVE)
-                    enet_packet_destroy(evt.packet);
-                break;
-            }
-        }
     }
     else if (buf[0] == 0x02)
     {
-        if (CurBlobType < 0 || CurBlobType > Blob_MAX) return;
+        if (CurBlobType < 0 || CurBlobType >= Blob_MAX) return;
         if (pkt->dataLength > (16+kChunkSize)) return;
 
         int type = buf[1];
@@ -555,7 +562,7 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
     }
     else if (buf[0] == 0x03)
     {
-        if (CurBlobType < 0 || CurBlobType > Blob_MAX) return;
+        if (CurBlobType < 0 || CurBlobType >= Blob_MAX) return;
         if (pkt->dataLength != 12) return;
 
         int type = buf[1];
@@ -568,6 +575,14 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
         if (CurBlobCRC != ExpectedCRC) {
             Platform::Log(Platform::LogLevel::Error, "Netplay: blob %d CRC mismatch! expected 0x%08X got 0x%08X\n",
                    CurBlobType, ExpectedCRC, CurBlobCRC);
+            // CRC failure - clean up the failed blob
+            if (Blobs[type])
+            {
+                delete[] Blobs[type];
+                Blobs[type] = nullptr;
+            }
+            BlobLens[type] = 0;
+            CurBlobType = -1;
             return;
         }
 
@@ -624,46 +639,77 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
     }
 }
 
-void Netplay::SyncClients()
+bool Netplay::SyncClients()
 {
-    if (!IsHost) return;
+    if (!IsHost) return false;
 
     SyncInProgress = true;
+    bool success = true;
 
-    // Scope block to acquire initial snapshot and broadcast state safely
+    // Capture the state snapshot outside the lock so
+    // enet_host_service can flush queued packets during polling.
+    NDS* nds = nds_instances[0];
+    if (!nds || !Host)
+    {
+        SyncInProgress = false;
+        return false;
+    }
+
+    u32 stateLen;
+    u8 *stateBuf;
+
+    std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
+    nds->DoSavestate(state.get());
+    stateLen = state->Length();
+    stateBuf = (u8 *) state->Buffer();
+    Platform::Log(Platform::LogLevel::Info, "[HOST] syncing clients. sending save state with size %d\n", stateLen);
+
     {
         TimedLock lock(NetworkMutex, "SyncClients_Init");
-
-        NDS* nds = nds_instances[0];
-        if (!nds)
+        if (!Host)
         {
             SyncInProgress = false;
-            return;
+            return false;
         }
-
-        std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
-        nds->DoSavestate(state.get());
-        Platform::Log(Platform::LogLevel::Info, "[HOST] syncing clients. sending save state with size %d\n", state->Length());
-        SendBlob(Blob_InitState, state->Length(), (u8 *) state->Buffer());
+        SendBlob(Blob_InitState, stateLen, stateBuf);
 
         u8 data[2];
         data[0] = 0x04;
         data[1] = (u8) nds->ConsoleType;
         ENetPacket* pkt = enet_packet_create(&data, 2, ENET_PACKET_FLAG_RELIABLE);
         enet_host_broadcast(Host, Chan_Blob, pkt);
+
+        // Flush queued packets so clients start receiving data immediately.
+        // enet_host_broadcast with RELIABLE only queues; packets aren't
+        // sent on the wire until enet_host_service or enet_host_flush runs.
+        enet_host_flush(Host);
     }
 
     int ngood = 0;
     ENetEvent evt;
+    u64 startTime = Platform::GetMSCount();
+    const u64 timeoutMS = 10000; // 10 seconds timeout
 
 // Main polling loop runs with granular locking per service turn
     while (ngood < (NumPlayers - 1))
     {
+        if (Platform::GetMSCount() - startTime > timeoutMS)
+        {
+            Platform::Log(Platform::LogLevel::Error, "[HOST] Synchronization timed out waiting for client ACKs.\n");
+            success = false;
+            break;
+        }
+
         int result = 0;
 
         // Non-blocking ENet poll: hold mutex only for the instant query
         {
             TimedLock netLock(NetworkMutex, "SyncClients_Service");
+            if (!Host)
+            {
+                success = false;
+                break;
+            }
             result = enet_host_service(Host, &evt, 0);
         }
 
@@ -683,7 +729,10 @@ void Netplay::SyncClients()
                 {
                     // ReceiveInputs handles its own InstanceMutex locking internally
                     TimedLock netLock(NetworkMutex, "SyncClients_Service");
-                    ReceiveInputs(evt, 0);
+                    if (Host)
+                    {
+                        ReceiveInputs(evt, 0);
+                    }
                     enet_packet_destroy(evt.packet);
                 }
                 else
@@ -694,6 +743,7 @@ void Netplay::SyncClients()
             else if (evt.type == ENET_EVENT_TYPE_DISCONNECT)
             {
                 Platform::Log(Platform::LogLevel::Error, "[HOST] Client disconnected during synchronization handshake.\n");
+                success = false;
                 break;
             }
         }
@@ -704,12 +754,16 @@ void Netplay::SyncClients()
         }
 
         if (!Active)
+        {
+            success = false;
             break;
+        }
     }
 
     if (ngood != (NumPlayers - 1))
     {
         Platform::Log(Platform::LogLevel::Error, "!!! SYNC FAILED !! Acknowledged: %d / Expected: %d\n", ngood, NumPlayers - 1);
+        success = false;
     }
     else
     {
@@ -717,6 +771,7 @@ void Netplay::SyncClients()
     }
 
     SyncInProgress = false;
+    return success;
 }
 
 void Netplay::StartGame()
@@ -731,9 +786,19 @@ void Netplay::StartGame()
 
     if (NumPlayers > 1)
     {
-        SyncClients();
+        if (!SyncClients())
+        {
+            Platform::Log(Platform::LogLevel::Error, "Netplay: Aborting game start due to synchronization failure.\n");
+            EndSession();
+            return;
+        }
 
         Platform::Mutex_Lock(NetworkMutex);
+        if (!Host)
+        {
+            Platform::Mutex_Unlock(NetworkMutex);
+            return;
+        }
         u8 cmd[1] = { Cmd_StartGame };
         ENetPacket* pkt = enet_packet_create(cmd, sizeof(cmd), ENET_PACKET_FLAG_RELIABLE);
         enet_host_broadcast(Host, Chan_Cmd, pkt);
@@ -766,7 +831,6 @@ void Netplay::StartLocal()
 
         PlayerToInstance[p] = i;
         InstanceToPlayer[i] = p;
-        ReceivedInputThisFrame[p] = false;
         i++;
     }
 
@@ -776,10 +840,10 @@ void Netplay::StartLocal()
 
 void Netplay::ProcessHost(int inst)
 {
-    if (!Host) return;
+    if (!Host || SyncInProgress) return;
 
     Platform::Mutex_Lock(NetworkMutex);
-    if (!Host)
+    if (!Host || SyncInProgress)
     {
         Platform::Mutex_Unlock(NetworkMutex);
         return;
@@ -1247,8 +1311,15 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
     u32 lastCompleteFrame = ntohl(report->lastCompleteFrame);
     u32 remoteHash = ntohl(report->stateHash);
 
-    InstanceState& pending = PendingFrames[inst];
-    NDS* nds = nds_instances[inst];
+    int targetInst = MirrorMode ? 0 : PlayerToInstance[index];
+    if (targetInst < 0 || targetInst >= 16)
+    {
+        Platform::Mutex_Unlock(InstanceMutex);
+        return;
+    }
+
+    InstanceState& pending = PendingFrames[targetInst];
+    NDS* nds = nds_instances[targetInst];
 
     // Check for desync if a hash was provided. Prefer an exact cached
     // snapshot because packets can arrive after this instance has run ahead.
@@ -1257,8 +1328,8 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
         u32 localHash = 0;
         const std::vector<u8>* localState = nullptr;
 
-        auto snapshotIt = StateSnapshots[inst].find(latestFrame);
-        if (snapshotIt != StateSnapshots[inst].end())
+        auto snapshotIt = StateSnapshots[targetInst].find(latestFrame);
+        if (snapshotIt != StateSnapshots[targetInst].end())
         {
             localHash = snapshotIt->second.Hash;
             localState = snapshotIt->second.Buffer.get();
@@ -1338,7 +1409,7 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
             bool missedFrame = false;
             for (u32 i = nds->NumFrames; i < currFrame; ++i)
             {
-                ApplyInputInternal(inst, nds, i);
+                ApplyInputInternal(targetInst, nds, i);
                 nds->RunFrame();
 
                 if (!missedFrame)
@@ -1359,17 +1430,17 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
                         missedFrame = true;
                         pending.Active = true;
                         pending.FrameNum = i;
-                        if (!ReusableStates[inst])
-                            ReusableStates[inst] = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
-                        ReusableStates[inst]->Rewind(true);
-                        nds->DoSavestate(ReusableStates[inst].get());
-                        pending.SavestateBuffer = std::move(ReusableStates[inst]);
+                        if (!ReusableStates[targetInst])
+                            ReusableStates[targetInst] = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
+                        ReusableStates[targetInst]->Rewind(true);
+                        nds->DoSavestate(ReusableStates[targetInst].get());
+                        pending.SavestateBuffer = std::move(ReusableStates[targetInst]);
                     }
                 }
             }
 
             Platform::Log(Platform::LogLevel::Info, "Netplay: instance %d caught up %d frames. Current frame: %d, load_ms=%u\n",
-                          inst, currFrame - prevWaitFrame, nds->NumFrames, (unsigned)(loadEndMS - loadStartMS));
+                          targetInst, currFrame - prevWaitFrame, nds->NumFrames, (unsigned)(loadEndMS - loadStartMS));
 
             int depth = (int)(currFrame - prevWaitFrame);
             if (depth > Diag.MaxRollbackDepth)
@@ -1378,17 +1449,15 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
             // After the rollback loop, recycle the now-current
             // SavestateBuffer back to the reusable pool so it is
             // available for the next snapshot.
-            if (pending.SavestateBuffer && !ReusableStates[inst])
-                ReusableStates[inst] = std::move(pending.SavestateBuffer);
+            if (pending.SavestateBuffer && !ReusableStates[targetInst])
+                ReusableStates[targetInst] = std::move(pending.SavestateBuffer);
         }
     }
     else if (!nds)
     {
         Platform::Log(Platform::LogLevel::Info,
-            "Netplay DEBUG: ReceiveInputs - nds is null for inst %d\n", inst);
+            "Netplay DEBUG: ReceiveInputs - nds is null for inst %d\n", targetInst);
     }
-
-    ReceivedInputThisFrame[index] = true;
 
     Platform::Mutex_Unlock(InstanceMutex);
 }
@@ -1502,7 +1571,7 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         Player &player = Players[i];
         if (player.Status != Player_Client && player.Status != Player_Host) continue;
 
-        if (!ReceivedInputThisFrame[i])
+        if (!GetInputFrame(i, nds->NumFrames))
         {
             allOtherInputsReceived = false;
         }
@@ -1544,16 +1613,6 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     Diag.PeerLastCompletedFrame = (minPeerFrame >= 0) ? (u32)minPeerFrame : 0;
     Platform::Mutex_Unlock(PlayersMutex);
 
-    // clear received flags for next frame
-    Platform::Mutex_Lock(PlayersMutex);
-    for (int i = 0; i < 16; ++i)
-    {
-        Player &player = Players[i];
-        if (player.Status != Player_Client && player.Status != Player_Host) continue;
-        ReceivedInputThisFrame[i] = false;
-    }
-    Platform::Mutex_Unlock(PlayersMutex);
-
     // delete all the frames that everyone already have
     // to save memory and keep packet sizes down
     if (lastCompletedFrame != -1)
@@ -1567,6 +1626,7 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
 
     // check if this frame has no inputs available from any other active player
     bool missingInputs = false;
+    Platform::Mutex_Lock(PlayersMutex);
     for (int i = 0; i < 16; i++)
     {
         if (i == MyPlayer.ID) continue;
@@ -1578,6 +1638,7 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
             break;
         }
     }
+    Platform::Mutex_Unlock(PlayersMutex);
 
     // Host never stalls -- it runs ahead and lets clients catch up via
     // rollback. Clients stall when missing inputs or clock-locked.
