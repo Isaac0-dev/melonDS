@@ -1802,9 +1802,9 @@ void Netplay::Process()
             while (enet_host_service(Host, &evt, 0) > 0)
             {
                 if (evt.channelID == Chan_Blob)
-                {
                     RecvBlob(evt.peer, evt.packet, 0);
-                }
+                else if (evt.channelID >= Chan_Input0 && evt.channelID < Chan_Cmd)
+                    ReceiveInputs(evt, 0);
                 if (evt.type == ENET_EVENT_TYPE_RECEIVE)
                     enet_packet_destroy(evt.packet);
             }
