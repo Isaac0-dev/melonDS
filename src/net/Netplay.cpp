@@ -414,6 +414,7 @@ void Netplay::EndSession()
     }
     CurBlobType = -1;
     CurBlobLen = 0;
+    BlobInProgress = false;
 
     PortToPlayerIndex.clear();
 }
@@ -519,6 +520,7 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
             }
             BlobLens[CurBlobType] = 0;
             CurBlobType = -1;
+            BlobInProgress = false;
         }
 
         // Clean up existing completed blob of the same type if not already processed/freed
@@ -537,6 +539,7 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
         CurBlobLen = len;
         CurBlobCRC = crc32(0L, Z_NULL, 0);
         BlobCurrSize = 0;
+        BlobInProgress = true;
     }
     else if (buf[0] == 0x02)
     {
@@ -583,12 +586,15 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
             }
             BlobLens[type] = 0;
             CurBlobType = -1;
+            BlobInProgress = false;
             return;
         }
 
         Platform::Log(Platform::LogLevel::Info, "Netplay: finished blob transfer, type %d, len %d\n", type, len);
         CurBlobType = -1;
         CurBlobLen = 0;
+        BlobInProgress = false;
+        BlobInProgress = false;
     }
     else if (buf[0] == 0x04)
     {
@@ -688,7 +694,7 @@ bool Netplay::SyncClients()
     int ngood = 0;
     ENetEvent evt;
     u64 startTime = Platform::GetMSCount();
-    const u64 timeoutMS = 10000; // 10 seconds timeout
+    const u64 timeoutMS = 120000; // 2 minutes for large blobs over tunnels
 
 // Main polling loop runs with granular locking per service turn
     while (ngood < (NumPlayers - 1))
@@ -1677,8 +1683,8 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     else // Sync_StrictLockstep
         shouldCheckpoint = true;
 
-    // For Predictive Host mode at low delay, allow the host to update its 
-    // pending checkpoint frame forward if it is running ahead blindly, 
+    // For Predictive Host mode at low delay, allow the host to update its
+    // pending checkpoint frame forward if it is running ahead blindly,
     // ensuring it doesn't hold an obsolete snapshot.
     bool canCapture = !pending.Active;
     if (IsHost && Settings.SyncMode == Sync_PredictiveHost && missingInputs)
@@ -1783,6 +1789,29 @@ void Netplay::ApplyInputInternal(int netplayID, NDS *nds, u32 frameNum)
 void Netplay::Process()
 {
     if (!Active) return;
+
+    // When a blob transfer is in progress (client receiving savestate),
+    // spin-poll aggressively so we receive all chunks quickly instead
+    // of waiting for the 1-second timer tick between each chunk.
+    if (BlobInProgress)
+    {
+        Platform::Mutex_Lock(NetworkMutex);
+        ENetEvent evt;
+        if (Host)
+        {
+            while (enet_host_service(Host, &evt, 0) > 0)
+            {
+                if (evt.channelID == Chan_Blob)
+                {
+                    RecvBlob(evt.peer, evt.packet, 0);
+                }
+                if (evt.type == ENET_EVENT_TYPE_RECEIVE)
+                    enet_packet_destroy(evt.packet);
+            }
+        }
+        Platform::Mutex_Unlock(NetworkMutex);
+        return;
+    }
 
     for (int i = 0; i < 16; i++)
     {

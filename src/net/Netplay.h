@@ -235,6 +235,7 @@ private:
     u32 CurBlobLen;
     u32 CurBlobCRC = 0;
     u32 BlobCurrSize;
+    bool BlobInProgress;
 };
 
 }
