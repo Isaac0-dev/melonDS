@@ -36,6 +36,8 @@ bool forceClient = false;
 namespace CLI
 {
 
+NetplayAutotestConfig netplayAutotest;
+
 CommandLineOptions* ManageArgs(QApplication& melon)
 {
     QCommandLineParser parser;
@@ -48,6 +50,11 @@ CommandLineOptions* ManageArgs(QApplication& melon)
     parser.addOption(QCommandLineOption({"f", "fullscreen"}, "Start melonDS in fullscreen mode"));
     parser.addOption(QCommandLineOption({"s", "server"}, "dev mode server netplay"));
     parser.addOption(QCommandLineOption({"c", "client"}, "dev mode client netplay"));
+    parser.addOption(QCommandLineOption("netplay-autotest", "Run unattended netplay test mode as host or client", "host/client"));
+    parser.addOption(QCommandLineOption("netplay-autotest-host", "Host address for netplay autotest clients", "host", "127.0.0.1"));
+    parser.addOption(QCommandLineOption("netplay-autotest-port", "Port for netplay autotest", "port", "8064"));
+    parser.addOption(QCommandLineOption("netplay-autotest-seed", "Seed for deterministic netplay autotest inputs", "seed", "1"));
+    parser.addOption(QCommandLineOption("netplay-autotest-duration", "Seconds before autotest exits cleanly; 0 disables in-emulator auto-exit", "seconds", "0"));
 
 #ifdef ARCHIVE_SUPPORT_ENABLED
     parser.addOption(QCommandLineOption({"a", "archive-file"}, "Specify file to load inside an archive given (NDS)", "rom"));
@@ -61,6 +68,44 @@ CommandLineOptions* ManageArgs(QApplication& melon)
     options->fullscreen = parser.isSet("fullscreen");
     forceServer = parser.isSet("server");
     forceClient = parser.isSet("client");
+
+    netplayAutotest = NetplayAutotestConfig();
+    if (parser.isSet("netplay-autotest"))
+    {
+        QString role = parser.value("netplay-autotest");
+        if (role == "host")
+            netplayAutotest.role = NetplayAutotestRole::Host;
+        else if (role == "client")
+            netplayAutotest.role = NetplayAutotestRole::Client;
+        else
+        {
+            Log(LogLevel::Error, "ERROR: --netplay-autotest only accepts host/client as arguments\n");
+            exit(1);
+        }
+
+        bool ok = false;
+        netplayAutotest.host = parser.value("netplay-autotest-host");
+        netplayAutotest.port = parser.value("netplay-autotest-port").toInt(&ok);
+        if (!ok || netplayAutotest.port <= 0 || netplayAutotest.port > 65535)
+        {
+            Log(LogLevel::Error, "ERROR: --netplay-autotest-port must be a valid TCP/UDP port\n");
+            exit(1);
+        }
+
+        netplayAutotest.seed = parser.value("netplay-autotest-seed").toUInt(&ok, 0);
+        if (!ok)
+        {
+            Log(LogLevel::Error, "ERROR: --netplay-autotest-seed must be an unsigned integer\n");
+            exit(1);
+        }
+
+        netplayAutotest.durationSeconds = parser.value("netplay-autotest-duration").toInt(&ok);
+        if (!ok || netplayAutotest.durationSeconds < 0)
+        {
+            Log(LogLevel::Error, "ERROR: --netplay-autotest-duration must be a non-negative integer\n");
+            exit(1);
+        }
+    }
 
     QStringList posargs = parser.positionalArguments();
     switch (posargs.size())

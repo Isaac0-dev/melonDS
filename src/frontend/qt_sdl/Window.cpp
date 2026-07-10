@@ -82,6 +82,7 @@
 #include "CameraManager.h"
 #include "Window.h"
 #include "AboutDialog.h"
+#include "CLI.h"
 
 using namespace melonDS;
 
@@ -1802,6 +1803,98 @@ void MainWindow::devhackNp(bool client)
         onNPStartClient();
     } else {
         onNPStartHost();
+    }
+}
+
+void MainWindow::startNetplayAutotest()
+{
+    using CLI::NetplayAutotestRole;
+
+    if (CLI::netplayAutotest.role == NetplayAutotestRole::Disabled)
+        return;
+
+    const bool isHost = CLI::netplayAutotest.role == NetplayAutotestRole::Host;
+    if (!netplayWarning(isHost))
+    {
+        Platform::Log(Platform::LogLevel::Error, "Netplay autotest: frontend setup was cancelled\n");
+        QApplication::exit(2);
+        return;
+    }
+
+    setMPInterface(MPInterface_Netplay);
+    auto& netplay = (Netplay&)MPInterface::Get();
+
+    bool started = false;
+    if (isHost)
+    {
+        started = netplay.StartHost("autotest-host", CLI::netplayAutotest.port);
+        if (started)
+            Platform::Log(Platform::LogLevel::Info, "Netplay autotest: host listening on port %d\n", CLI::netplayAutotest.port);
+    }
+    else
+    {
+        const std::string host = CLI::netplayAutotest.host.toStdString();
+        started = netplay.StartClient("autotest-client", host.c_str(), CLI::netplayAutotest.port);
+        if (started)
+            Platform::Log(Platform::LogLevel::Info, "Netplay autotest: client connected to %s:%d\n", host.c_str(), CLI::netplayAutotest.port);
+    }
+
+    if (!started)
+    {
+        Platform::Log(Platform::LogLevel::Error, "Netplay autotest: failed to start %s\n", isHost ? "host" : "client");
+        QApplication::exit(2);
+        return;
+    }
+
+    QTimer* pump = new QTimer(this);
+    pump->setInterval(10);
+    connect(pump, &QTimer::timeout, this, [pump, isHost]()
+    {
+        if (MPInterface::GetType() != MPInterface_Netplay)
+        {
+            pump->stop();
+            pump->deleteLater();
+            return;
+        }
+
+        auto& netplay = (Netplay&)MPInterface::Get();
+        if (netplay.HasGameInstances())
+        {
+            pump->stop();
+            pump->deleteLater();
+            return;
+        }
+
+        netplay.Process();
+
+        if (isHost)
+        {
+            bool hasClient = false;
+            for (const auto& player : netplay.GetPlayerList())
+            {
+                if (player.Status == Netplay::Player_Client)
+                {
+                    hasClient = true;
+                    break;
+                }
+            }
+
+            if (hasClient)
+            {
+                Platform::Log(Platform::LogLevel::Info, "Netplay autotest: client ready, starting game\n");
+                netplay.StartGame();
+            }
+        }
+    });
+    pump->start();
+
+    if (CLI::netplayAutotest.durationSeconds > 0)
+    {
+        QTimer::singleShot(CLI::netplayAutotest.durationSeconds * 1000, this, []()
+        {
+            Platform::Log(Platform::LogLevel::Info, "Netplay autotest: requested duration elapsed, exiting\n");
+            QApplication::quit();
+        });
     }
 }
 

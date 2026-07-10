@@ -396,6 +396,9 @@ int main(int argc, char** argv)
         extern bool forceServer;
         extern bool forceClient;
 
+        if (CLI::netplayAutotest.role != CLI::NetplayAutotestRole::Disabled) {
+            win->startNetplayAutotest();
+        }
         if (forceServer) {
             win->devhackNp(false);
         }

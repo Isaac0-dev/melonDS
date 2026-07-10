@@ -656,15 +656,15 @@ void Netplay::SyncClients()
     int ngood = 0;
     ENetEvent evt;
 
-    // Main polling loop runs with granular locking per service turn
+// Main polling loop runs with granular locking per service turn
     while (ngood < (NumPlayers - 1))
     {
         int result = 0;
-        
-        // Granular ENet lock: only hold while querying the socket
+
+        // Non-blocking ENet poll: hold mutex only for the instant query
         {
             TimedLock netLock(NetworkMutex, "SyncClients_Service");
-            result = enet_host_service(Host, &evt, 50); 
+            result = enet_host_service(Host, &evt, 0);
         }
 
         if (result > 0)
@@ -682,6 +682,7 @@ void Netplay::SyncClients()
                 else if (evt.channelID >= Chan_Input0 && evt.channelID < Chan_Cmd)
                 {
                     // ReceiveInputs handles its own InstanceMutex locking internally
+                    TimedLock netLock(NetworkMutex, "SyncClients_Service");
                     ReceiveInputs(evt, 0);
                     enet_packet_destroy(evt.packet);
                 }
@@ -696,8 +697,13 @@ void Netplay::SyncClients()
                 break;
             }
         }
-        
-        if (!Active) 
+        else
+        {
+            // No event available; yield so the UI thread doesn't busy-spin
+            Platform::Sleep(1);
+        }
+
+        if (!Active)
             break;
     }
 
@@ -1395,6 +1401,12 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
 
     // Register/update NDS pointer for this instance
     nds_instances[netplayID] = nds;
+
+    if (SyncInProgress)
+    {
+        StallFrame = true;
+        return;
+    }
 
     InstanceState& pending = PendingFrames[netplayID];
 

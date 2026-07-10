@@ -38,6 +38,24 @@ struct CommandLineOptions
 
 extern CommandLineOptions* ManageArgs(QApplication& melon);
 
+enum class NetplayAutotestRole
+{
+    Disabled,
+    Host,
+    Client,
+};
+
+struct NetplayAutotestConfig
+{
+    NetplayAutotestRole role = NetplayAutotestRole::Disabled;
+    QString host = "127.0.0.1";
+    int port = 8064;
+    unsigned int seed = 1;
+    int durationSeconds = 0;
+};
+
+extern NetplayAutotestConfig netplayAutotest;
+
 }
 
 #endif

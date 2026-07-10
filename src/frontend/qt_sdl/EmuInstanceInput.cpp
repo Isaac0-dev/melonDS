@@ -24,6 +24,7 @@
 #include "SDL_sensor.h"
 #include "main.h"
 #include "Config.h"
+#include "CLI.h"
 
 using namespace melonDS;
 
@@ -71,6 +72,17 @@ const char* EmuInstance::hotkeyNames[HK_MAX] =
 };
 
 std::shared_ptr<SDL_mutex> EmuInstance::joyMutexGlobal = nullptr;
+
+static u32 NetplayAutotestRand(u32 seed, u32 frame, u32 player)
+{
+    u32 x = seed ^ (frame * 0x9E3779B9u) ^ ((player + 1) * 0x85EBCA6Bu);
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x;
+}
 
 
 void EmuInstance::inputInit()
@@ -440,6 +452,35 @@ void EmuInstance::inputProcess()
     }
 
     inputMask = keyInputMask & joyInputMask;
+
+    if (CLI::netplayAutotest.role != CLI::NetplayAutotestRole::Disabled && nds && netplayID >= 0)
+    {
+        const u32 frame = nds->NumFrames;
+        const u32 rnd = NetplayAutotestRand(CLI::netplayAutotest.seed, frame / 12, 0);
+
+        u32 mask = 0xFFF;
+
+        // Useful smoke-test profile for menu-driven racers: keep accelerating,
+        // keep accepting early prompts, then vary steering and shoulder buttons.
+        mask &= ~(1 << 0); // A
+        if (frame < 900 && (frame % 45) < 8)
+            mask &= ~(1 << 3); // Start
+
+        if ((rnd & 0x03) == 0)
+            mask &= ~(1 << 4); // Right
+        else if ((rnd & 0x03) == 1)
+            mask &= ~(1 << 5); // Left
+
+        if ((rnd & 0x30) == 0x10)
+            mask &= ~(1 << 8); // R
+        if ((rnd & 0xC0) == 0x40)
+            mask &= ~(1 << 9); // L
+        if ((rnd & 0x700) == 0x300)
+            mask &= ~(1 << 1); // B
+
+        inputMask = mask;
+        isTouching = false;
+    }
 
     joyHotkeyMask = 0;
     if (joystick)
