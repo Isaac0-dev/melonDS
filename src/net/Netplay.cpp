@@ -370,6 +370,7 @@ void Netplay::EndSession()
     Active = false;
     StallFrame = false;
     GameInited = false;
+    SyncInProgress = false;
 
     Platform::Mutex_Lock(NetworkMutex);
     for (int i = 0; i < 16; i++)
@@ -593,7 +594,6 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
         Platform::Log(Platform::LogLevel::Info, "Netplay: finished blob transfer, type %d, len %d\n", type, len);
         CurBlobType = -1;
         CurBlobLen = 0;
-        BlobInProgress = false;
         BlobInProgress = false;
     }
     else if (buf[0] == 0x04)
@@ -1799,8 +1799,11 @@ void Netplay::Process()
         ENetEvent evt;
         if (Host)
         {
-            while (enet_host_service(Host, &evt, 0) > 0)
+            for (;;)
             {
+                if (!BlobInProgress) break;
+                int r = enet_host_service(Host, &evt, 0);
+                if (r <= 0) break;
                 if (evt.channelID == Chan_Blob)
                     RecvBlob(evt.peer, evt.packet, 0);
                 else if (evt.channelID >= Chan_Input0 && evt.channelID < Chan_Cmd)
