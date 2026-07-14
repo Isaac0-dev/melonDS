@@ -1310,12 +1310,17 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
         return;
     }
 
-    const InputReport* report = reinterpret_cast<const InputReport*>(data);
-
-    u32 seq = ntohl(report->seq);
-    u32 latestFrame = ntohl(report->frameIndex);
-    u32 lastCompleteFrame = ntohl(report->lastCompleteFrame);
-    u32 remoteHash = ntohl(report->stateHash);
+    // Read packed InputReport fields safely via memcpy to avoid
+    // unaligned-access SIGBUS on platforms that enforce alignment.
+    u32 seq, latestFrame, lastCompleteFrame, remoteHash;
+    memcpy(&seq, data + offsetof(InputReport, seq), 4);
+    memcpy(&latestFrame, data + offsetof(InputReport, frameIndex), 4);
+    memcpy(&lastCompleteFrame, data + offsetof(InputReport, lastCompleteFrame), 4);
+    memcpy(&remoteHash, data + offsetof(InputReport, stateHash), 4);
+    seq = ntohl(seq);
+    latestFrame = ntohl(latestFrame);
+    lastCompleteFrame = ntohl(lastCompleteFrame);
+    remoteHash = ntohl(remoteHash);
 
     int targetInst = MirrorMode ? 0 : PlayerToInstance[index];
     if (targetInst < 0 || targetInst >= 16)
@@ -1374,14 +1379,17 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
 
     auto &playerHistory = InputHistory[index];
     for (size_t i = 0; i < entryCount; ++i) {
-        const InputFrame* netFrame = reinterpret_cast<const InputFrame*>(ptr);
-
         InputFrame frame;
-        frame.FrameNum = ntohl(netFrame->FrameNum);
-        frame.KeyMask  = ntohl(netFrame->KeyMask);
-        frame.Touching = ntohl(netFrame->Touching);
-        frame.TouchX   = ntohl(netFrame->TouchX);
-        frame.TouchY   = ntohl(netFrame->TouchY);
+        memcpy(&frame.FrameNum, ptr, 4);
+        memcpy(&frame.KeyMask, ptr + 4, 4);
+        memcpy(&frame.Touching, ptr + 8, 4);
+        memcpy(&frame.TouchX, ptr + 12, 4);
+        memcpy(&frame.TouchY, ptr + 16, 4);
+        frame.FrameNum = ntohl(frame.FrameNum);
+        frame.KeyMask  = ntohl(frame.KeyMask);
+        frame.Touching = ntohl(frame.Touching);
+        frame.TouchX   = ntohl(frame.TouchX);
+        frame.TouchY   = ntohl(frame.TouchY);
 
         playerHistory[frame.FrameNum] = frame;
 
