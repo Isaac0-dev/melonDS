@@ -1466,10 +1466,10 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
                 ReusableStates[targetInst] = std::move(pending.SavestateBuffer);
         }
     }
-    else if (!nds)
+    else if (!nds && GameInited)
     {
-        Platform::Log(Platform::LogLevel::Info,
-            "Netplay DEBUG: ReceiveInputs - nds is null for inst %d\n", targetInst);
+        Platform::Log(Platform::LogLevel::Warn,
+            "Netplay: ReceiveInputs - nds is null for inst %d\n", targetInst);
     }
 
     Platform::Mutex_Unlock(InstanceMutex);
@@ -1483,6 +1483,9 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
 
     // Register/update NDS pointer for this instance
     nds_instances[netplayID] = nds;
+    // In mirror mode, ReceiveInputs hard-codes targetInst=0, so
+    // mirror it there too.
+    if (MirrorMode) nds_instances[0] = nds;
 
     if (SyncInProgress)
     {
