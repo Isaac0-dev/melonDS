@@ -1952,7 +1952,8 @@ bool MainWindow::netplayWarning(bool host)
     if (doDelInstances) deleteAllEmuInstances(1);
 
     // hack: create function to allow interaction with frontend
-    OnStartEmulatorThread = [this]()
+    // consoleType: -1 = keep current, 0 = DS, 1 = DSi
+    OnStartEmulatorThread = [this](int consoleType)
     {
         printf("OnStartEmulatorThread called\n");
 
@@ -1963,8 +1964,22 @@ bool MainWindow::netplayWarning(bool host)
         // start local ds
         EmuInstance *localEmuInstance = ((MainWindow*)this)->getEmuInstance();
         localEmuInstance->RegisterNetplayDS(netplay.GetMyPlayer().ID); // register the local ds
-        if (!localEmuInstance->nds) localEmuInstance->updateConsole();
+
+        if (consoleType >= 0)
+        {
+            int prev = Config::GetGlobalTable().GetInt("Emu.ConsoleType");
+            Config::GetGlobalTable().SetInt("Emu.ConsoleType", consoleType);
+            localEmuInstance->updateConsole(); // recreates NDS/DSi as needed
+            Config::GetGlobalTable().SetInt("Emu.ConsoleType", prev);
+        }
+        else
+        {
+            if (!localEmuInstance->nds) localEmuInstance->updateConsole();
+        }
         netplay.RegisterInstance(netplay.GetMyPlayer().ID, localEmuInstance->nds);
+        // In mirror mode, also register at index 0 so ReceiveInputs finds it.
+        if (netplay.GetMirrorStatus())
+            netplay.RegisterInstance(0, localEmuInstance->nds);
         localEmuInstance->nds->Start();
         localEmuInstance->getEmuThread()->emuRun();
 

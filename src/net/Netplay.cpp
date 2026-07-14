@@ -83,7 +83,7 @@ enum
     Cmd_UpdateSettings,             // 05 -- host->client -- game settings changed
 };
 
-std::function<void()> OnStartEmulatorThread = nullptr;
+std::function<void(int)> OnStartEmulatorThread = nullptr;
 
 Netplay::Netplay() noexcept : LocalMP(), Inited(false)
 {
@@ -153,7 +153,8 @@ Netplay::~Netplay() noexcept
 }
 
 // To be called just before a game starts
-bool Netplay::InitGame()
+// consoleType: -1 = keep current, 0 = DS, 1 = DSi
+bool Netplay::InitGame(int consoleType)
 {
     if (GameInited) return true;
 
@@ -163,7 +164,7 @@ bool Netplay::InitGame()
         return false;
     }
 
-    OnStartEmulatorThread(); // Hack to access frontend code
+    OnStartEmulatorThread(consoleType); // Hack to access frontend code
 
     GameInited = true;
     return true;
@@ -600,10 +601,13 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
     {
         if (pkt->dataLength != 2) return;
 
-        InitGame();
+        // Pass the state's console type so the frontend can create
+        // the correct NDS derived type (NDS vs DSi) before loading.
+        InitGame(buf[1]);
 
-        // InitGame frees old NDS at nds_instances[inst] and creates
-        // a new one at nds_instances[MyPlayer.ID]; scan for it.
+        // InitGame may have recreated the NDS (via updateConsole).
+        // The frontend callback already registered the new pointer at
+        // nds_instances[MyPlayer.ID] and nds_instances[0]; scan for it.
         NDS* nds = nullptr;
         for (int i = 0; i < 16; i++)
         {

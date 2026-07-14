@@ -37,7 +37,7 @@ namespace melonDS
 
 const u32 kChunkSize = 0x10000;
 
-extern std::function<void()> OnStartEmulatorThread;
+extern std::function<void(int)> OnStartEmulatorThread;
 
 // since netplay relies on local MP comm locally,
 // we extend the LocalMP class to reuse its functionality
@@ -191,7 +191,7 @@ private:
         std::shared_ptr<std::vector<u8>> Buffer;
     };
 
-    bool InitGame();
+    bool InitGame(int consoleType = -1);
     bool SyncClients();
     void SendNetworkSettings();
     void StartLocal();
