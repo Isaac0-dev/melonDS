@@ -602,16 +602,15 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
 
         InitGame();
 
-        NDS* nds = nds_instances[inst];
-        if (!MirrorMode)
+        // InitGame frees old NDS at nds_instances[inst] and creates
+        // a new one at nds_instances[MyPlayer.ID]; scan for it.
+        NDS* nds = nullptr;
+        for (int i = 0; i < 16; i++)
         {
-            for (int i = 0; i < 16; i++)
+            if (nds_instances[i])
             {
-                if (nds_instances[i])
-                {
-                    nds = nds_instances[i];
-                    break;
-                }
+                nds = nds_instances[i];
+                break;
             }
         }
         if (!nds) return;
