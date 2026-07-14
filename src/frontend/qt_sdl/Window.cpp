@@ -1965,7 +1965,11 @@ bool MainWindow::netplayWarning(bool host)
         EmuInstance *localEmuInstance = ((MainWindow*)this)->getEmuInstance();
         localEmuInstance->RegisterNetplayDS(netplay.GetMyPlayer().ID); // register the local ds
 
-        if (consoleType >= 0)
+        // Recreate NDS only when the console type actually differs.
+        // Unnecessary recreation destroys live scheduler state that
+        // DoSavestate depends on for correct emulation after load.
+        if (consoleType >= 0 &&
+            (!localEmuInstance->nds || localEmuInstance->nds->ConsoleType != consoleType))
         {
             int prev = Config::GetGlobalTable().GetInt("Emu.ConsoleType");
             Config::GetGlobalTable().SetInt("Emu.ConsoleType", consoleType);
