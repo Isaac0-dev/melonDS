@@ -281,6 +281,11 @@ void Savestate::Rewind(bool save)
 
     buffer_offset = 0;
     finished = false;
+
+    if (save)
+    {
+        WriteSavestateHeader();
+    }
 }
 
 void Savestate::CloseCurrentSection()
