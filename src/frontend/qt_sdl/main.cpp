@@ -151,6 +151,18 @@ void deleteAllEmuInstances(int first)
         deleteEmuInstance(i);
 }
 
+void startNetplayInstances()
+{
+    for (int i = 0; i < kMaxEmuInstances; i++)
+    {
+        if (emuInstances[i] && emuInstances[i]->getNDS())
+        {
+            emuInstances[i]->getNDS()->Start();
+            emuInstances[i]->getEmuThread()->emuRun();
+        }
+    }
+}
+
 int numEmuInstances()
 {
     int ret = 0;
@@ -221,7 +233,7 @@ void setMPInterface(MPInterfaceType type)
 
     // set receive timeout
     // TODO: different settings per interface?
-    MPInterface::Get().SetRecvTimeout(Config::GetGlobalTable().GetInt("MP.RecvTimeout"));
+    { auto iface = MPInterface::GetShared(); iface->SetRecvTimeout(Config::GetGlobalTable().GetInt("MP.RecvTimeout")); }
 
     // update UI appropriately
     // TODO: decide how to deal with multi-window when it becomes a thing

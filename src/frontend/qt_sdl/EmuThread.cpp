@@ -156,8 +156,9 @@ void EmuThread::run()
     while (emuStatus != emuStatus_Exit)
     {
         bool needLag = false;
-        MPInterface &mpInterface = MPInterface::Get();
-        const bool netplayActive = MPInterface::GetType() == MPInterface_Netplay;
+        auto mpInterfacePtr = MPInterface::GetShared();
+        MPInterface &mpInterface = *mpInterfacePtr;
+        const bool netplayActive = mpInterfacePtr->GetInterfaceType() == MPInterface_Netplay;
         mpInterface.Process();
         emuInstance->inputProcess();
         if (netplayActive && emuInstance->netplayID > -1)
@@ -270,8 +271,9 @@ void EmuThread::run()
             }
 
             // process input and hotkeys
-            const bool netplayActive = MPInterface::GetType() == MPInterface_Netplay;
-            Netplay* netplay = netplayActive ? (Netplay*)&MPInterface::Get() : nullptr;
+            auto mpInterfacePtr2 = MPInterface::GetShared();
+            const bool netplayActive = mpInterfacePtr2 && mpInterfacePtr2->GetInterfaceType() == MPInterface_Netplay;
+            Netplay* netplay = netplayActive ? static_cast<Netplay*>(mpInterfacePtr2.get()) : nullptr;
             if (!netplayActive || emuInstance->netplayID < 0 ||
                 ((netplay->NetworkMode == Netplay::InputDelayMode_Golf) &&
                 (netplay->GolfModePlayerID == netplay->GetMyPlayer().ID)))
@@ -512,7 +514,7 @@ void EmuThread::handleMessages()
             emuPauseStack = emuPauseStackRunning;
 
             emuInstance->audioDisable();
-            MPInterface::Get().End(emuInstance->instanceID);
+            { auto iface = MPInterface::GetShared(); iface->End(emuInstance->instanceID); }
             break;
 
         case msg_EmuRun:

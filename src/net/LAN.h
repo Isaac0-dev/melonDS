@@ -52,6 +52,8 @@ public:
     LAN& operator=(LAN&& other) = delete;
     ~LAN() noexcept;
 
+    MPInterfaceType GetInterfaceType() const override { return MPInterface_LAN; }
+
     enum PlayerStatus
     {
         Player_None = 0,        // no player in this entry

@@ -20,6 +20,7 @@
 #define MPINTERFACE_H
 
 #include <memory>
+#include <mutex>
 #include "types.h"
 
 namespace melonDS
@@ -48,9 +49,27 @@ class MPInterface
 public:
     virtual ~MPInterface() = default;
 
-    static MPInterface& Get() { return *Current; }
-    static MPInterfaceType GetType() { return CurrentType; }
+    static MPInterface& Get()
+    {
+        // Safe only within the full expression; the shared_ptr copy from
+        // GetShared() keeps the object alive until the ';'.
+        // Long-lived holders must use GetShared() instead.
+        return *GetShared();
+    }
+    static std::shared_ptr<MPInterface> GetShared()
+    {
+        std::lock_guard<std::mutex> lock(CurrentMutex);
+        return Current;
+    }
+    static MPInterfaceType GetType()
+    {
+        std::lock_guard<std::mutex> lock(CurrentMutex);
+        auto ptr = Current;
+        return ptr ? ptr->GetInterfaceType() : MPInterface_Dummy;
+    }
     static void Set(MPInterfaceType type);
+
+    virtual MPInterfaceType GetInterfaceType() const = 0;
 
     [[nodiscard]] int GetRecvTimeout() const noexcept { return RecvTimeout; }
     void SetRecvTimeout(int timeout) noexcept { RecvTimeout = timeout; }
@@ -73,8 +92,8 @@ protected:
     int RecvTimeout = 25;
 
 private:
-    static MPInterfaceType CurrentType;
-    static std::unique_ptr<MPInterface> Current;
+    static std::shared_ptr<MPInterface> Current;
+    static std::mutex CurrentMutex;
 };
 
 }

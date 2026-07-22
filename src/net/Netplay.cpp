@@ -84,6 +84,7 @@ enum
 };
 
 std::function<void(int)> OnStartEmulatorThread = nullptr;
+std::function<void()> OnStartNetplayRunning = nullptr;
 
 Netplay::Netplay() noexcept : LocalMP(), Inited(false)
 {
@@ -126,6 +127,7 @@ Netplay::Netplay() noexcept : LocalMP(), Inited(false)
     }
     PacketSequenceCounter = 1;
     DesyncDumped = false;
+    memset(LastPacketSeq, 0, sizeof(LastPacketSeq));
 
     // TODO make this somewhat nicer
     if (enet_initialize() != 0)
@@ -425,9 +427,19 @@ void Netplay::SendNetworkSettings()
 {
     if (!IsHost) return;
 
-    u8 cmd[1 + sizeof(NetworkSettings)];
+    u32 activationFrame = 0;
+    if (nds_instances[0])
+        activationFrame = nds_instances[0]->NumFrames + 2;
+    PendingSettingsActivationFrame = activationFrame;
+
+    NetworkSettings toSend = PendingSettingsUpdate.has_value()
+        ? *PendingSettingsUpdate : Settings;
+
+    u32 netActivation = htonl(activationFrame);
+    u8 cmd[1 + sizeof(netActivation) + sizeof(NetworkSettings)];
     cmd[0] = Cmd_UpdateSettings;
-    memcpy(&cmd[1], &Settings, sizeof(NetworkSettings));
+    memcpy(&cmd[1], &netActivation, sizeof(netActivation));
+    memcpy(&cmd[1 + sizeof(netActivation)], &toSend, sizeof(NetworkSettings));
     ENetPacket* pkt = enet_packet_create(cmd, sizeof(cmd), ENET_PACKET_FLAG_RELIABLE);
     enet_host_broadcast(Host, Chan_Cmd, pkt);
 }
@@ -435,7 +447,15 @@ void Netplay::SendNetworkSettings()
 void Netplay::SetInputBufferSize(int value)
 {
     if (!IsHost) return;
-    Settings.Delay = value;
+    // Disable live changes during a running game; the frame counters
+    // can differ between peers under rollback, making a synchronous
+    // switch impossible.  The new value is applied at the next game
+    // start via the initial-sync handshake.
+    if (GameInited) return;
+
+    if (!PendingSettingsUpdate.has_value())
+        PendingSettingsUpdate = Settings;
+    PendingSettingsUpdate->Delay = (u32)value;
 
     // tell clients that it changed
     SendNetworkSettings();
@@ -444,7 +464,12 @@ void Netplay::SetInputBufferSize(int value)
 void Netplay::SetSyncMethod(SyncMethod method)
 {
     if (!IsHost) return;
-    Settings.SyncMode = (int)method;
+    if (GameInited) return;
+
+    if (!PendingSettingsUpdate.has_value())
+        PendingSettingsUpdate = Settings;
+    PendingSettingsUpdate->SyncMode = (int)method;
+
     SendNetworkSettings();
 }
 
@@ -509,7 +534,7 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
         if (type >= Blob_MAX) return;
 
         u32 len = *(u32*)&buf[4];
-        if (len > 0x40000000) return;
+        if (len > 32 * 1024 * 1024) return;
 
         // Clean up previous incomplete/stale blob if any
         if (CurBlobType != -1)
@@ -546,7 +571,7 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
     else if (buf[0] == 0x02)
     {
         if (CurBlobType < 0 || CurBlobType >= Blob_MAX) return;
-        if (pkt->dataLength > (16+kChunkSize)) return;
+        if (pkt->dataLength < 16 || pkt->dataLength > (16+kChunkSize)) return;
 
         int type = buf[1];
         if (type != CurBlobType) return;
@@ -822,10 +847,6 @@ void Netplay::StartLocal()
 {
     printf("starting netplay game\n");
 
-    // Pre-allocate reusable savestate buffers
-    for (int i = 0; i < 16; i++)
-        ReusableStates[i] = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
-
     // assign local instances to players
 
     PlayerToInstance[MyPlayer.ID] = 0;
@@ -844,6 +865,9 @@ void Netplay::StartLocal()
     }
 
     InitGame();
+
+    if (OnStartNetplayRunning)
+        OnStartNetplayRunning();
 }
 
 
@@ -1137,7 +1161,14 @@ void Netplay::ProcessClient(int inst)
                     break;
                 case Cmd_UpdateSettings:
                     {
-                        memcpy(&Settings, &data[1], sizeof(NetworkSettings));
+                        if (event.packet->dataLength < 1 + 4 + sizeof(NetworkSettings)) break;
+                        u32 activationFrame;
+                        memcpy(&activationFrame, &data[1], 4);
+                        activationFrame = ntohl(activationFrame);
+                        NetworkSettings newSettings;
+                        memcpy(&newSettings, &data[1+4], sizeof(NetworkSettings));
+                        PendingSettingsUpdate = newSettings;
+                        PendingSettingsActivationFrame = activationFrame;
                     }
                 }
             }
@@ -1205,7 +1236,7 @@ void Netplay::StoreStateSnapshot(int inst, u32 frameNum, const StateSnapshot& sn
 
     auto& snapshots = StateSnapshots[inst];
     snapshots[frameNum] = snapshot;
-    while (snapshots.size() > 32)
+    while (snapshots.size() > 8)
         snapshots.erase(snapshots.begin());
 }
 
@@ -1324,6 +1355,13 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
     latestFrame = ntohl(latestFrame);
     lastCompleteFrame = ntohl(lastCompleteFrame);
     remoteHash = ntohl(remoteHash);
+
+    if (LastPacketSeq[index] != 0 && (s32)(seq - LastPacketSeq[index]) <= 0)
+    {
+        Platform::Mutex_Unlock(InstanceMutex);
+        return;
+    }
+    LastPacketSeq[index] = seq;
 
     int targetInst = MirrorMode ? 0 : PlayerToInstance[index];
     if (targetInst < 0 || targetInst >= 16)
@@ -1483,6 +1521,14 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
 {
     if (!Active) return;
 
+    if (PendingSettingsUpdate.has_value() &&
+        nds->NumFrames >= PendingSettingsActivationFrame)
+    {
+        Settings = *PendingSettingsUpdate;
+        PendingSettingsUpdate.reset();
+        PendingSettingsActivationFrame = 0;
+    }
+
     StallFrame = false;
 
     // Register/update NDS pointer for this instance
@@ -1519,6 +1565,8 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
     // canonical input that was recorded Settings.Delay frames earlier.
     InputHistory[MyPlayer.ID].emplace(immediateFrame.FrameNum, immediateFrame);
     InputHistory[MyPlayer.ID][delayedFrame.FrameNum] = delayedFrame;
+    while (InputHistory[MyPlayer.ID].size() > 1024)
+        InputHistory[MyPlayer.ID].erase(InputHistory[MyPlayer.ID].begin());
     Platform::Mutex_Unlock(InstanceMutex);
 
     // Calculate a full savestate hash for desync detection every 60 frames.

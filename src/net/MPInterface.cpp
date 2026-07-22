@@ -27,6 +27,8 @@ namespace melonDS
 class DummyMP : public MPInterface
 {
 public:
+    MPInterfaceType GetInterfaceType() const override { return MPInterface_Dummy; }
+
     void Process() override {}
 
     void Begin(int inst) override {}
@@ -42,32 +44,31 @@ public:
 };
 
 
-std::unique_ptr<MPInterface> MPInterface::Current(std::make_unique<DummyMP>());
-MPInterfaceType MPInterface::CurrentType = MPInterface_Dummy;
+std::shared_ptr<MPInterface> MPInterface::Current(std::make_shared<DummyMP>());
+std::mutex MPInterface::CurrentMutex;
 
 
 void MPInterface::Set(MPInterfaceType type)
 {
+    std::lock_guard<std::mutex> lock(CurrentMutex);
     switch (type)
     {
     case MPInterface_Local:
-        Current = std::make_unique<LocalMP>();
+        Current = std::make_shared<LocalMP>();
         break;
 
     case MPInterface_LAN:
-        Current = std::make_unique<LAN>();
+        Current = std::make_shared<LAN>();
         break;
 
     case MPInterface_Netplay:
-        Current = std::make_unique<Netplay>();
+        Current = std::make_shared<Netplay>();
         break;
 
     default:
-        Current = std::make_unique<DummyMP>();
+        Current = std::make_shared<DummyMP>();
         break;
     }
-
-    CurrentType = type;
 }
 
 }

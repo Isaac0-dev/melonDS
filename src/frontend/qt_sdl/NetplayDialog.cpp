@@ -42,7 +42,7 @@ using namespace melonDS;
 
 NetplayDialog* netplayDlg = nullptr;
 
-#define netplay() ((Netplay&)MPInterface::Get())
+#define netplay() (static_cast<Netplay&>(*MPInterface::GetShared()))
 
 
 NetplayStartHostDialog::NetplayStartHostDialog(QWidget* parent) : QDialog(parent), ui(new Ui::NetplayStartHostDialog)

@@ -24,6 +24,7 @@
 #include <unordered_map>
 #include <vector>
 #include <memory>
+#include <optional>
 
 #include <enet/enet.h>
 
@@ -38,6 +39,7 @@ namespace melonDS
 const u32 kChunkSize = 0x10000;
 
 extern std::function<void(int)> OnStartEmulatorThread;
+extern std::function<void()> OnStartNetplayRunning;
 
 // since netplay relies on local MP comm locally,
 // we extend the LocalMP class to reuse its functionality
@@ -50,6 +52,8 @@ public:
     Netplay(Netplay&& other) = delete;
     Netplay& operator=(Netplay&& other) = delete;
     ~Netplay() noexcept;
+
+    MPInterfaceType GetInterfaceType() const override { return MPInterface_Netplay; }
 
     enum PlayerStatus
     {
@@ -216,7 +220,10 @@ private:
     Platform::Mutex* InstanceMutex;
     Platform::Mutex* NetworkMutex;
     u32 PacketSequenceCounter;
+    u32 LastPacketSeq[16];
     bool DesyncDumped;
+    std::optional<NetworkSettings> PendingSettingsUpdate;
+    u32 PendingSettingsActivationFrame = 0;
     std::map<u32, StateSnapshot> StateSnapshots[16];
     NDS* nds_instances[16];
 

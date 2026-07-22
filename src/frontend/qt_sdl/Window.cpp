@@ -1822,19 +1822,19 @@ void MainWindow::startNetplayAutotest()
     }
 
     setMPInterface(MPInterface_Netplay);
-    auto& netplay = (Netplay&)MPInterface::Get();
+    auto netplayPtr = std::static_pointer_cast<Netplay>(MPInterface::GetShared());
 
     bool started = false;
     if (isHost)
     {
-        started = netplay.StartHost("autotest-host", CLI::netplayAutotest.port);
+        started = netplayPtr->StartHost("autotest-host", CLI::netplayAutotest.port);
         if (started)
             Platform::Log(Platform::LogLevel::Info, "Netplay autotest: host listening on port %d\n", CLI::netplayAutotest.port);
     }
     else
     {
         const std::string host = CLI::netplayAutotest.host.toStdString();
-        started = netplay.StartClient("autotest-client", host.c_str(), CLI::netplayAutotest.port);
+        started = netplayPtr->StartClient("autotest-client", host.c_str(), CLI::netplayAutotest.port);
         if (started)
             Platform::Log(Platform::LogLevel::Info, "Netplay autotest: client connected to %s:%d\n", host.c_str(), CLI::netplayAutotest.port);
     }
@@ -1848,29 +1848,28 @@ void MainWindow::startNetplayAutotest()
 
     QTimer* pump = new QTimer(this);
     pump->setInterval(10);
-    connect(pump, &QTimer::timeout, this, [pump, isHost]()
+    connect(pump, &QTimer::timeout, this, [pump, isHost, netplayPtr]()
     {
-        if (MPInterface::GetType() != MPInterface_Netplay)
+        if (netplayPtr->GetInterfaceType() != MPInterface_Netplay)
         {
             pump->stop();
             pump->deleteLater();
             return;
         }
 
-        auto& netplay = (Netplay&)MPInterface::Get();
-        if (netplay.HasGameInstances())
+        if (netplayPtr->HasGameInstances())
         {
             pump->stop();
             pump->deleteLater();
             return;
         }
 
-        netplay.Process();
+        netplayPtr->Process();
 
         if (isHost)
         {
             bool hasClient = false;
-            for (const auto& player : netplay.GetPlayerList())
+            for (const auto& player : netplayPtr->GetPlayerList())
             {
                 if (player.Status == Netplay::Player_Client)
                 {
@@ -1882,7 +1881,7 @@ void MainWindow::startNetplayAutotest()
             if (hasClient)
             {
                 Platform::Log(Platform::LogLevel::Info, "Netplay autotest: client ready, starting game\n");
-                netplay.StartGame();
+                netplayPtr->StartGame();
             }
         }
     });
@@ -1959,7 +1958,8 @@ bool MainWindow::netplayWarning(bool host)
 
         deleteAllEmuInstances(1);
 
-        auto &netplay = (Netplay&)MPInterface::Get();
+        auto netplayPtr3 = std::static_pointer_cast<Netplay>(MPInterface::GetShared());
+        auto& netplay = *netplayPtr3;
 
         // start local ds
         EmuInstance *localEmuInstance = ((MainWindow*)this)->getEmuInstance();
@@ -1984,8 +1984,6 @@ bool MainWindow::netplayWarning(bool host)
         // In mirror mode, also register at index 0 so ReceiveInputs finds it.
         if (netplay.GetMirrorStatus())
             netplay.RegisterInstance(0, localEmuInstance->nds);
-        localEmuInstance->nds->Start();
-        localEmuInstance->getEmuThread()->emuRun();
 
         if (netplay.GetMirrorStatus())
             return;
@@ -2020,9 +2018,12 @@ bool MainWindow::netplayWarning(bool host)
                 emuInstance->bootToMenu(msgError);
             }
 
-            emuInstance->nds->Start();
-            emuInstance->getEmuThread()->emuRun();
         }
+    };
+
+    OnStartNetplayRunning = []()
+    {
+        startNetplayInstances();
     };
 
     return true;
@@ -2184,7 +2185,7 @@ void MainWindow::onMPSettingsFinished(int res)
 {
     emuInstance->mpAudioMode = globalCfg.GetInt("MP.AudioMode");
     emuInstance->updateAudioMuteByWindowFocus();
-    MPInterface::Get().SetRecvTimeout(globalCfg.GetInt("MP.RecvTimeout"));
+    { auto iface4 = MPInterface::GetShared(); iface4->SetRecvTimeout(globalCfg.GetInt("MP.RecvTimeout")); }
 
     emuThread->emuUnpause();
 }

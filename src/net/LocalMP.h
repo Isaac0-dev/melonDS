@@ -48,6 +48,8 @@ public:
     LocalMP& operator=(LocalMP&& other) = delete;
     ~LocalMP() noexcept;
 
+    MPInterfaceType GetInterfaceType() const override { return MPInterface_Local; }
+
     void Process() {}
 
     void Begin(int inst);

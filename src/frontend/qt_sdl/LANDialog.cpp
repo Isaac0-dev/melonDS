@@ -41,7 +41,7 @@ using namespace melonDS;
 LANStartClientDialog* lanClientDlg = nullptr;
 LANDialog* lanDlg = nullptr;
 
-#define lan() ((LAN&)MPInterface::Get())
+#define lan() (static_cast<LAN&>(*MPInterface::GetShared()))
 
 
 LANStartHostDialog::LANStartHostDialog(QWidget* parent) : QDialog(parent), ui(new Ui::LANStartHostDialog)

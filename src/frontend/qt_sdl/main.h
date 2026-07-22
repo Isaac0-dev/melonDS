@@ -62,5 +62,6 @@ int numEmuInstances();
 void broadcastInstanceCommand(int cmd, QVariant& param, int sourceinst);
 
 void setMPInterface(melonDS::MPInterfaceType type);
+void startNetplayInstances();
 
 #endif // MAIN_H
