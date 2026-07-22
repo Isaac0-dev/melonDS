@@ -294,14 +294,14 @@ bool LAN::StartClient(const char* playername, const char* host)
 
     ENetEvent event;
     int conn = 0;
-    u32 starttick = (u32)Platform::GetMSCount();
-    const int conntimeout = 5000;
+    u64 starttick = Platform::GetMSCount();
+    const u64 conntimeout = 5000;
     for (;;)
     {
-        u32 curtick = (u32)Platform::GetMSCount();
-        if (curtick < starttick) break;
-        int timeout = conntimeout - (int)(curtick - starttick);
-        if (timeout < 0) break;
+        u64 curtick = Platform::GetMSCount();
+        u64 elapsed = curtick - starttick;
+        if (elapsed >= conntimeout) break;
+        int timeout = (int)(conntimeout - elapsed);
         if (enet_host_service(Host, &event, timeout) > 0)
         {
             if (conn == 0 && event.type == ENET_EVENT_TYPE_CONNECT)
@@ -673,7 +673,8 @@ void LAN::ProcessClientEvent(ENetEvent& event)
                 if (i == MyPlayer.ID) continue;
                 if (player->Status != Player_Client) continue;
 
-                if (player->Address == event.peer->address.host)
+                if (player->Address == event.peer->address.host &&
+                    (RemotePeers[i] == nullptr || RemotePeers[i]->address.port == event.peer->address.port))
                 {
                     playerid = i;
                     break;
@@ -1042,7 +1043,7 @@ u16 LAN::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
     if (!Host) return 0;
 
     u16 ret = 0;
-    u16 myinstmask = 1 << MyPlayer.ID;
+    u16 myinstmask = 1 << inst;
 
     if ((myinstmask & ConnectedBitmask) == ConnectedBitmask)
         return 0;

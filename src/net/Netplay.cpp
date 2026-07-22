@@ -288,14 +288,14 @@ bool Netplay::StartClient(const char* playername, const char* host, int port)
 
     ENetEvent event;
     int conn = 0;
-    u32 starttick = (u32)Platform::GetMSCount();
-    const int conntimeout = 5000;
+    u64 starttick = Platform::GetMSCount();
+    const u64 conntimeout = 5000;
     for (;;)
     {
-        u32 curtick = (u32)Platform::GetMSCount();
-        if (curtick < starttick) break;
-        int timeout = conntimeout - (int)(curtick - starttick);
-        if (timeout < 0) break;
+        u64 curtick = Platform::GetMSCount();
+        u64 elapsed = curtick - starttick;
+        if (elapsed >= conntimeout) break;
+        int timeout = (int)(conntimeout - elapsed);
         if (enet_host_service(Host, &event, timeout) > 0)
         {
             if (conn == 0 && event.type == ENET_EVENT_TYPE_CONNECT)
@@ -1471,6 +1471,7 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
                 {
                     // check if we have inputs from every active player for this frame
                     bool allHaveInputs = true;
+                    Platform::Mutex_Lock(PlayersMutex);
                     for (int p = 0; p < 16; p++)
                     {
                         if (Players[p].Status == Player_None) continue;
@@ -1480,6 +1481,7 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
                             break;
                         }
                     }
+                    Platform::Mutex_Unlock(PlayersMutex);
                     if (!allHaveInputs)
                     {
                         missedFrame = true;
@@ -1489,6 +1491,7 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
                             ReusableStates[targetInst] = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
                         ReusableStates[targetInst]->Rewind(true);
                         nds->DoSavestate(ReusableStates[targetInst].get());
+                        ReusableStates[targetInst]->Finish();
                         pending.SavestateBuffer = std::move(ReusableStates[targetInst]);
                     }
                 }
@@ -1580,6 +1583,7 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
 
     // Send the inputs to other players
     {
+        Platform::Mutex_Lock(InstanceMutex);
         size_t packetSize = sizeof(InputReport) + InputHistory[MyPlayer.ID].size() * sizeof(InputFrame);
 
         std::vector<u8> buffer(packetSize);
@@ -1597,7 +1601,6 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
         std::memcpy(ptr, &report, sizeof(report));
         ptr += sizeof(report);
 
-        Platform::Mutex_Lock(InstanceMutex);
         for (auto& pair : InputHistory[MyPlayer.ID]) {
             InputFrame tmp = pair.second;
             tmp.FrameNum = htonl(tmp.FrameNum);
@@ -1764,6 +1767,7 @@ void Netplay::ProcessInput(int netplayID, NDS *nds, u32 inputMask, bool isTouchi
             ReusableStates[netplayID] = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
         ReusableStates[netplayID]->Rewind(true);
         nds->DoSavestate(ReusableStates[netplayID].get());
+        ReusableStates[netplayID]->Finish();
         pending.SavestateBuffer = std::move(ReusableStates[netplayID]);
         Platform::Mutex_Unlock(InstanceMutex);
     }
