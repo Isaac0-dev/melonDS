@@ -1409,41 +1409,6 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
     InstanceState& pending = PendingFrames[targetInst];
     NDS* nds = nds_instances[targetInst];
 
-    // Check for desync if a hash was provided. Prefer an exact cached
-    // snapshot because packets can arrive after this instance has run ahead.
-    if (remoteHash != 0 && nds)
-    {
-        u32 localHash = 0;
-        const std::vector<u8>* localState = nullptr;
-
-        auto snapshotIt = StateSnapshots[targetInst].find(latestFrame);
-        if (snapshotIt != StateSnapshots[targetInst].end())
-        {
-            localHash = snapshotIt->second.Hash;
-            localState = snapshotIt->second.Buffer.get();
-        }
-        else if (nds->NumFrames == latestFrame)
-        {
-            localHash = ComputeStateHash(nds);
-        }
-        else
-        {
-            Platform::Log(Platform::LogLevel::Info,
-                "Netplay: no cached state hash for remote frame %u (local frame %u, remote hash %08X)\n",
-                latestFrame, nds->NumFrames, remoteHash);
-        }
-
-        if (localHash != 0 && localHash != remoteHash)
-        {
-            Platform::Log(Platform::LogLevel::Error, "Netplay: DESYNC DETECTED at frame %u! (local: %08X, remote: %08X)\n",
-                          latestFrame, localHash, remoteHash);
-            if (localState)
-                DumpDesyncState(*localState, latestFrame, localHash, remoteHash);
-            else
-                DumpDesyncState(nds, latestFrame, localHash, remoteHash);
-        }
-    }
-
     // register the last frame this player has completed
     Platform::Mutex_Lock(PlayersMutex);
     Player &player = Players[index];
@@ -1551,6 +1516,41 @@ void Netplay::ReceiveInputs(ENetEvent &event, int inst)
     {
         Platform::Log(Platform::LogLevel::Warn,
             "Netplay: ReceiveInputs - nds is null for inst %d\n", targetInst);
+    }
+
+    // Check for desync after rollback, so the comparison uses corrected
+    // state instead of stale cached snapshots captured before running ahead.
+    if (remoteHash != 0 && nds)
+    {
+        u32 localHash = 0;
+        const std::vector<u8>* localState = nullptr;
+
+        auto snapshotIt = StateSnapshots[targetInst].find(latestFrame);
+        if (snapshotIt != StateSnapshots[targetInst].end())
+        {
+            localHash = snapshotIt->second.Hash;
+            localState = snapshotIt->second.Buffer.get();
+        }
+        else if (nds->NumFrames == latestFrame)
+        {
+            localHash = ComputeStateHash(nds);
+        }
+        else
+        {
+            Platform::Log(Platform::LogLevel::Info,
+                "Netplay: no cached state hash for remote frame %u (local frame %u, remote hash %08X)\n",
+                latestFrame, nds->NumFrames, remoteHash);
+        }
+
+        if (localHash != 0 && localHash != remoteHash)
+        {
+            Platform::Log(Platform::LogLevel::Error, "Netplay: DESYNC DETECTED at frame %u! (local: %08X, remote: %08X)\n",
+                          latestFrame, localHash, remoteHash);
+            if (localState)
+                DumpDesyncState(*localState, latestFrame, localHash, remoteHash);
+            else
+                DumpDesyncState(nds, latestFrame, localHash, remoteHash);
+        }
     }
 
     Platform::Mutex_Unlock(InstanceMutex);
