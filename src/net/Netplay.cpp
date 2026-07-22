@@ -624,7 +624,11 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
     }
     else if (buf[0] == 0x04)
     {
-        if (pkt->dataLength != 2) return;
+        if (pkt->dataLength != 2 + 4 + 4) return;
+
+        u32 hostARM9CRC, hostARM7CRC;
+        memcpy(&hostARM9CRC, &buf[2], 4);
+        memcpy(&hostARM7CRC, &buf[6], 4);
 
         // Pass the state's console type so the frontend can create
         // the correct NDS derived type (NDS vs DSi) before loading.
@@ -643,6 +647,29 @@ void Netplay::RecvBlob(ENetPeer* peer, ENetPacket* pkt, int inst)
             }
         }
         if (!nds) return;
+
+        // Verify that the host and client have identical BIOS contents.
+        u32 localARM9CRC = crc32(0L, nds->GetARM9BIOS().data(), nds->GetARM9BIOS().size());
+        u32 localARM7CRC = crc32(0L, nds->GetARM7BIOS().data(), nds->GetARM7BIOS().size());
+
+        if (localARM9CRC != hostARM9CRC || localARM7CRC != hostARM7CRC)
+        {
+            Platform::Log(Platform::LogLevel::Error,
+                "Netplay: BIOS mismatch between host and client! "
+                "All participants must use the same BIOS configuration "
+                "(set ExternalBIOSEnable identically and use the same BIOS files).\n");
+            Platform::Log(Platform::LogLevel::Error,
+                "Netplay:   host ARM9 CRC: %08X, client ARM9 CRC: %08X\n", hostARM9CRC, localARM9CRC);
+            Platform::Log(Platform::LogLevel::Error,
+                "Netplay:   host ARM7 CRC: %08X, client ARM7 CRC: %08X\n", hostARM7CRC, localARM7CRC);
+            for (int i = 0; i < Blob_MAX; i++)
+            {
+                if (Blobs[i]) delete[] Blobs[i];
+                Blobs[i] = nullptr;
+                BlobLens[i] = 0;
+            }
+            return;
+        }
 
         // reset
         nds->ConsoleType = buf[1];
@@ -692,6 +719,9 @@ bool Netplay::SyncClients()
     u32 stateLen;
     u8 *stateBuf;
 
+    Platform::Log(Platform::LogLevel::Info, "[HOST] Netplay: host is using %s BIOS.\n",
+        nds->IsLoadedARM9BIOSKnownNative() ? "native" : "FreeBIOS");
+
     std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
     nds->DoSavestate(state.get());
     state->Finish();
@@ -708,10 +738,15 @@ bool Netplay::SyncClients()
         }
         SendBlob(Blob_InitState, stateLen, stateBuf);
 
-        u8 data[2];
+        u32 arm9BIOSCRC = crc32(0L, nds->GetARM9BIOS().data(), nds->GetARM9BIOS().size());
+        u32 arm7BIOSCRC = crc32(0L, nds->GetARM7BIOS().data(), nds->GetARM7BIOS().size());
+
+        u8 data[2 + 4 + 4];
         data[0] = 0x04;
         data[1] = (u8) nds->ConsoleType;
-        ENetPacket* pkt = enet_packet_create(&data, 2, ENET_PACKET_FLAG_RELIABLE);
+        memcpy(&data[2], &arm9BIOSCRC, 4);
+        memcpy(&data[6], &arm7BIOSCRC, 4);
+        ENetPacket* pkt = enet_packet_create(&data, sizeof(data), ENET_PACKET_FLAG_RELIABLE);
         enet_host_broadcast(Host, Chan_Blob, pkt);
 
         // Flush queued packets so clients start receiving data immediately.
