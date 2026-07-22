@@ -694,6 +694,7 @@ bool Netplay::SyncClients()
 
     std::unique_ptr<Savestate> state = std::make_unique<Savestate>(Savestate::DEFAULT_SIZE);
     nds->DoSavestate(state.get());
+    state->Finish();
     stateLen = state->Length();
     stateBuf = (u8 *) state->Buffer();
     Platform::Log(Platform::LogLevel::Info, "[HOST] syncing clients. sending save state with size %d\n", stateLen);
